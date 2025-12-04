@@ -56,8 +56,8 @@ class SoraClient:
     def format_storyboard_prompt(prompt: str) -> str:
         """将分镜格式提示词转换为API所需格式
 
-        输入: [5.0s]猫猫从飞机上跳伞 [5.0s]猫猫降落 [1.0s]猫猫屋顶跑酷
-        输出: Shot 1:\nduration: 5.0sec\nScene: 猫猫从飞机上跳伞\n\nShot 2:\nduration: 5.0sec\nScene: 猫猫降落\n\nShot 3:\nduration: 1.0sec\nScene: 猫猫屋顶跑酷
+        输入: 猫猫的奇妙冒险\n[5.0s]猫猫从飞机上跳伞 [5.0s]猫猫降落
+        输出: current timeline:\nShot 1:...\n\ninstructions:\n猫猫的奇妙冒险
 
         Args:
             prompt: 原始分镜格式提示词
@@ -72,13 +72,26 @@ class SoraClient:
         if not matches:
             return prompt
 
+        # 提取总述(第一个[时间]之前的内容)
+        first_bracket_pos = prompt.find('[')
+        instructions = ""
+        if first_bracket_pos > 0:
+            instructions = prompt[:first_bracket_pos].strip()
+
+        # 格式化分镜
         formatted_shots = []
         for idx, (duration, scene) in enumerate(matches, 1):
             scene = scene.strip()
             shot = f"Shot {idx}:\nduration: {duration}sec\nScene: {scene}"
             formatted_shots.append(shot)
 
-        return "\n\n".join(formatted_shots)
+        timeline = "\n\n".join(formatted_shots)
+
+        # 如果有总述,添加instructions部分
+        if instructions:
+            return f"current timeline:\n{timeline}\n\ninstructions:\n{instructions}"
+        else:
+            return timeline
 
     async def _make_request(self, method: str, endpoint: str, token: str,
                            json_data: Optional[Dict] = None,
