@@ -123,6 +123,15 @@
                             </svg>
                             <span class="text-sm font-medium">新增</span>
                         </button>
+                        <button onclick="openBatchAddModal()" class="inline-flex items-center justify-center rounded-md bg-purple-600 text-white hover:bg-purple-700 h-8 px-3" title="批量新增Token">
+                            <svg class="h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                                <line x1="17" y1="8" x2="17" y2="16"/>
+                                <line x1="13" y1="12" x2="21" y2="12"/>
+                            </svg>
+                            <span class="text-sm font-medium">批量新增</span>
+                        </button>
                     </div>
                 </div>
                 
@@ -636,6 +645,77 @@
         </div>
     </div>
 
+    <!-- 批量新增模态框 -->
+    <div id="batchAddModal" class="hidden fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+        <div class="bg-background rounded-lg border border-border w-full max-w-2xl shadow-xl max-h-[90vh] flex flex-col">
+            <div class="flex items-center justify-between p-5 border-b border-border">
+                <h3 class="text-lg font-semibold">批量新增 Token</h3>
+                <button onclick="closeBatchAddModal()" class="text-muted-foreground hover:text-foreground">
+                    <svg class="h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="p-5 overflow-y-auto flex-1 space-y-4">
+                <div>
+                    <label class="text-sm font-medium mb-2 block">Token 类型</label>
+                    <div class="flex gap-4">
+                        <label class="inline-flex items-center gap-2 cursor-pointer">
+                            <input type="radio" name="batchTokenType" value="rt" checked class="h-4 w-4" onchange="updateBatchPlaceholder()">
+                            <span class="text-sm">Refresh Token (RT)</span>
+                        </label>
+                        <label class="inline-flex items-center gap-2 cursor-pointer">
+                            <input type="radio" name="batchTokenType" value="st" class="h-4 w-4" onchange="updateBatchPlaceholder()">
+                            <span class="text-sm">Session Token (ST)</span>
+                        </label>
+                    </div>
+                </div>
+                <div>
+                    <label class="text-sm font-medium mb-2 block">Token 列表（一行一个）</label>
+                    <textarea id="batchTokenList" class="flex min-h-[200px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono" placeholder="每行输入一个 Refresh Token..."></textarea>
+                    <p class="text-xs text-muted-foreground mt-1">每行一个 Token，空行会被忽略</p>
+                </div>
+                <div class="flex gap-4">
+                    <label class="inline-flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" id="batchImageEnabled" checked class="h-4 w-4 rounded border-input">
+                        <span class="text-sm">图片生成</span>
+                    </label>
+                    <label class="inline-flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" id="batchVideoEnabled" checked class="h-4 w-4 rounded border-input">
+                        <span class="text-sm">视频生成</span>
+                    </label>
+                </div>
+                <div id="batchProgress" class="hidden">
+                    <div class="rounded-md bg-blue-50 dark:bg-blue-900/20 p-3 border border-blue-200 dark:border-blue-800">
+                        <p class="text-sm text-blue-800 dark:text-blue-200 mb-2">
+                            <strong>处理进度：</strong><span id="batchProgressText">0/0</span>
+                        </p>
+                        <div class="w-full bg-gray-200 rounded-full h-2">
+                            <div id="batchProgressBar" class="bg-blue-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+                        </div>
+                        <div id="batchLog" class="mt-3 max-h-32 overflow-y-auto text-xs font-mono space-y-1"></div>
+                    </div>
+                </div>
+                <div class="rounded-md bg-yellow-50 dark:bg-yellow-900/20 p-3 border border-yellow-200 dark:border-yellow-800">
+                    <p class="text-xs text-yellow-800 dark:text-yellow-200">
+                        <strong>说明：</strong>系统会自动将 RT/ST 转换为 AT，然后添加 Token。如果邮箱已存在则跳过。
+                    </p>
+                </div>
+            </div>
+            <div class="flex items-center justify-end gap-3 p-5 border-t border-border">
+                <button onclick="closeBatchAddModal()" class="inline-flex items-center justify-center rounded-md border border-input bg-background hover:bg-accent h-9 px-5">取消</button>
+                <button id="batchAddBtn" onclick="submitBatchAdd()" class="inline-flex items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-5">
+                    <span id="batchAddBtnText">开始添加</span>
+                    <svg id="batchAddBtnSpinner" class="hidden animate-spin h-4 w-4 ml-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let allTokens=[];
         const $=(id)=>document.getElementById(id),
@@ -670,6 +750,11 @@
         closeSora2Modal=()=>{$('sora2Modal').classList.add('hidden');$('sora2TokenId').value='';$('sora2InviteCode').value=''},
         openImportModal=()=>{$('importModal').classList.remove('hidden');$('importFile').value=''},
         closeImportModal=()=>{$('importModal').classList.add('hidden');$('importFile').value=''},
+        openBatchAddModal=()=>{$('batchAddModal').classList.remove('hidden');$('batchTokenList').value='';$('batchProgress').classList.add('hidden');$('batchLog').innerHTML='';$('batchImageEnabled').checked=true;$('batchVideoEnabled').checked=true;updateBatchPlaceholder()},
+        closeBatchAddModal=()=>{$('batchAddModal').classList.add('hidden');$('batchTokenList').value='';$('batchProgress').classList.add('hidden');$('batchLog').innerHTML=''},
+        updateBatchPlaceholder=()=>{const type=document.querySelector('input[name="batchTokenType"]:checked').value;$('batchTokenList').placeholder=type==='rt'?'每行输入一个 Refresh Token...':'每行输入一个 Session Token...'},
+        addBatchLog=(msg,type='info')=>{const log=$('batchLog');const color=type==='success'?'text-green-600':type==='error'?'text-red-600':'text-gray-600';log.innerHTML+=`<div class="${color}">${msg}</div>`;log.scrollTop=log.scrollHeight},
+        submitBatchAdd=async()=>{const tokenType=document.querySelector('input[name="batchTokenType"]:checked').value;const tokenList=$('batchTokenList').value.trim().split('\n').map(t=>t.trim()).filter(t=>t.length>0);const imageEnabled=$('batchImageEnabled').checked;const videoEnabled=$('batchVideoEnabled').checked;if(tokenList.length===0)return showToast('请输入至少一个Token','error');const btn=$('batchAddBtn'),btnText=$('batchAddBtnText'),btnSpinner=$('batchAddBtnSpinner');btn.disabled=true;btnText.textContent='处理中...';btnSpinner.classList.remove('hidden');$('batchProgress').classList.remove('hidden');$('batchLog').innerHTML='';let success=0,failed=0,skipped=0;const total=tokenList.length;for(let i=0;i<tokenList.length;i++){const token=tokenList[i];$('batchProgressText').textContent=`${i+1}/${total}`;$('batchProgressBar').style.width=`${((i+1)/total)*100}%`;addBatchLog(`[${i+1}/${total}] 正在处理...`);try{const convertUrl=tokenType==='rt'?'/api/tokens/rt2at':'/api/tokens/st2at';const convertBody=tokenType==='rt'?{rt:token}:{st:token};const convertR=await apiRequest(convertUrl,{method:'POST',body:JSON.stringify(convertBody)});if(!convertR){addBatchLog(`[${i+1}/${total}] 转换失败: 请求错误`,'error');failed++;continue}const convertD=await convertR.json();if(!convertD.success||!convertD.access_token){addBatchLog(`[${i+1}/${total}] 转换失败: ${convertD.message||convertD.detail||'未知错误'}`,'error');failed++;continue}const at=convertD.access_token;const newRt=convertD.refresh_token||null;const addR=await apiRequest('/api/tokens',{method:'POST',body:JSON.stringify({token:at,st:tokenType==='st'?token:null,rt:tokenType==='rt'?(newRt||token):null,image_enabled:imageEnabled,video_enabled:videoEnabled,image_concurrency:-1,video_concurrency:-1})});if(!addR){addBatchLog(`[${i+1}/${total}] 添加失败: 请求错误`,'error');failed++;continue}if(addR.status===409){addBatchLog(`[${i+1}/${total}] 跳过: Token已存在`,'info');skipped++;continue}const addD=await addR.json();if(addD.success){addBatchLog(`[${i+1}/${total}] 成功: ${addD.email||'已添加'}`,'success');success++}else{addBatchLog(`[${i+1}/${total}] 添加失败: ${addD.detail||addD.message||'未知错误'}`,'error');failed++}}catch(e){addBatchLog(`[${i+1}/${total}] 错误: ${e.message}`,'error');failed++}}btn.disabled=false;btnText.textContent='开始添加';btnSpinner.classList.add('hidden');await refreshTokens();showToast(`批量添加完成！成功: ${success}, 失败: ${failed}, 跳过: ${skipped}`,'success')},
         exportTokens=()=>{if(allTokens.length===0){showToast('没有Token可导出','error');return}const exportData=allTokens.map(t=>({email:t.email,access_token:t.token,session_token:t.st||null,refresh_token:t.rt||null,is_active:t.is_active,image_enabled:t.image_enabled!==false,video_enabled:t.video_enabled!==false,image_concurrency:t.image_concurrency||(-1),video_concurrency:t.video_concurrency||(-1)}));const dataStr=JSON.stringify(exportData,null,2);const dataBlob=new Blob([dataStr],{type:'application/json'});const url=URL.createObjectURL(dataBlob);const link=document.createElement('a');link.href=url;link.download=`tokens_${new Date().toISOString().split('T')[0]}.json`;document.body.appendChild(link);link.click();document.body.removeChild(link);URL.revokeObjectURL(url);showToast(`已导出 ${allTokens.length} 个Token`,'success')},
         submitImportTokens=async()=>{const fileInput=$('importFile');if(!fileInput.files||fileInput.files.length===0){showToast('请选择文件','error');return}const file=fileInput.files[0];if(!file.name.endsWith('.json')){showToast('请选择JSON文件','error');return}try{const fileContent=await file.text();const importData=JSON.parse(fileContent);if(!Array.isArray(importData)){showToast('JSON格式错误：应为数组','error');return}if(importData.length===0){showToast('JSON文件为空','error');return}const btn=$('importBtn'),btnText=$('importBtnText'),btnSpinner=$('importBtnSpinner');btn.disabled=true;btnText.textContent='导入中...';btnSpinner.classList.remove('hidden');try{const r=await apiRequest('/api/tokens/import',{method:'POST',body:JSON.stringify({tokens:importData})});if(!r){btn.disabled=false;btnText.textContent='导入';btnSpinner.classList.add('hidden');return}const d=await r.json();if(d.success){closeImportModal();await refreshTokens();const msg=`导入成功！新增: ${d.added||0}, 更新: ${d.updated||0}`;showToast(msg,'success')}else{showToast('导入失败: '+(d.detail||d.message||'未知错误'),'error')}}catch(e){showToast('导入失败: '+e.message,'error')}finally{btn.disabled=false;btnText.textContent='导入';btnSpinner.classList.add('hidden')}}catch(e){showToast('文件解析失败: '+e.message,'error')}},
         submitSora2Activate=async()=>{const tokenId=parseInt($('sora2TokenId').value),inviteCode=$('sora2InviteCode').value.trim();if(!tokenId)return showToast('Token ID无效','error');if(!inviteCode)return showToast('请输入邀请码','error');if(inviteCode.length!==6)return showToast('邀请码必须是6位','error');const btn=$('sora2ActivateBtn'),btnText=$('sora2ActivateBtnText'),btnSpinner=$('sora2ActivateBtnSpinner');btn.disabled=true;btnText.textContent='激活中...';btnSpinner.classList.remove('hidden');try{showToast('正在激活Sora2...','info');const r=await apiRequest(`/api/tokens/${tokenId}/sora2/activate?invite_code=${inviteCode}`,{method:'POST'});if(!r){btn.disabled=false;btnText.textContent='激活';btnSpinner.classList.add('hidden');return}const d=await r.json();if(d.success){closeSora2Modal();await refreshTokens();if(d.already_accepted){showToast('Sora2已激活（之前已接受）','success')}else{showToast(`Sora2激活成功！邀请码: ${d.invite_code||'无'}`,'success')}}else{showToast('激活失败: '+(d.message||'未知错误'),'error')}}catch(e){showToast('激活失败: '+e.message,'error')}finally{btn.disabled=false;btnText.textContent='激活';btnSpinner.classList.add('hidden')}},

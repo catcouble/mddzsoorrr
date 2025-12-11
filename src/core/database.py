@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Optional, List
 from pathlib import Path
-from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, WatermarkFreeConfig, CacheConfig, GenerationConfig, TokenRefreshConfig
+from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, WatermarkFreeConfig, CacheConfig, GenerationConfig, TokenRefreshConfig, Character
 
 class Database:
     """SQLite database manager"""
@@ -413,10 +413,32 @@ class Database:
                 )
             """)
 
+            # Characters table (角色卡)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS characters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cameo_id TEXT UNIQUE NOT NULL,
+                    character_id TEXT,
+                    token_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    profile_url TEXT,
+                    instruction_set TEXT,
+                    safety_instruction_set TEXT,
+                    visibility TEXT DEFAULT 'private',
+                    status TEXT DEFAULT 'finalized',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (token_id) REFERENCES tokens(id)
+                )
+            """)
+
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_status ON tasks(status)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_active ON tokens(is_active)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_character_cameo_id ON characters(cameo_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_character_token_id ON characters(token_id)")
 
             # Migration: Add daily statistics columns if they don't exist
             if not await self._column_exists(db, "token_stats", "today_image_count"):
@@ -1135,4 +1157,101 @@ class Database:
                 WHERE id = 1
             """, (at_auto_refresh_enabled,))
             await db.commit()
+
+    # Character (角色卡) operations
+    async def create_character(self, character: Character) -> int:
+        """Create a new character record"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                INSERT INTO characters (cameo_id, character_id, token_id, username, display_name, 
+                                       profile_url, instruction_set, safety_instruction_set, 
+                                       visibility, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (character.cameo_id, character.character_id, character.token_id, 
+                  character.username, character.display_name, character.profile_url,
+                  character.instruction_set, character.safety_instruction_set,
+                  character.visibility, character.status))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_character_by_cameo_id(self, cameo_id: str) -> Optional[Character]:
+        """Get character by cameo_id"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM characters WHERE cameo_id = ?", (cameo_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return Character(**dict(row))
+            return None
+
+    async def get_character_by_id(self, character_db_id: int) -> Optional[Character]:
+        """Get character by database id"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM characters WHERE id = ?", (character_db_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return Character(**dict(row))
+            return None
+
+    async def get_characters_by_token_id(self, token_id: int) -> List[Character]:
+        """Get all characters for a specific token"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM characters WHERE token_id = ? ORDER BY created_at DESC", (token_id,)
+            )
+            rows = await cursor.fetchall()
+            return [Character(**dict(row)) for row in rows]
+
+    async def get_all_characters(self) -> List[Character]:
+        """Get all characters"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM characters ORDER BY created_at DESC"
+            )
+            rows = await cursor.fetchall()
+            return [Character(**dict(row)) for row in rows]
+
+    async def update_character(self, cameo_id: str, **kwargs) -> bool:
+        """Update character fields by cameo_id"""
+        if not kwargs:
+            return False
+        
+        # Build dynamic update query
+        set_clauses = []
+        values = []
+        for key, value in kwargs.items():
+            if key in ['character_id', 'username', 'display_name', 'profile_url', 
+                       'instruction_set', 'safety_instruction_set', 'visibility', 'status']:
+                set_clauses.append(f"{key} = ?")
+                values.append(value)
+        
+        if not set_clauses:
+            return False
+        
+        set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(cameo_id)
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"UPDATE characters SET {', '.join(set_clauses)} WHERE cameo_id = ?",
+                values
+            )
+            await db.commit()
+            return True
+
+    async def delete_character(self, cameo_id: str) -> bool:
+        """Delete character by cameo_id"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM characters WHERE cameo_id = ?", (cameo_id,)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 

@@ -903,6 +903,10 @@ class TokenManager:
     async def get_all_tokens(self) -> List[Token]:
         """Get all tokens"""
         return await self.db.get_all_tokens()
+
+    async def get_token_by_id(self, token_id: int) -> Optional[Token]:
+        """Get a specific token by ID"""
+        return await self.db.get_token(token_id)
     
     async def update_token_status(self, token_id: int, is_active: bool):
         """Update token active status"""

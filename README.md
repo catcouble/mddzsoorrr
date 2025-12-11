@@ -1,291 +1,482 @@
+> **本项目二次开发基于 [sora2api](https://github.com/TheSmallHanCat/sora2api)**
+> 
+> **原作者: [TheSmallHanCat](https://github.com/TheSmallHanCat)**
+
 # Sora2API
 
-<div align="center">
+OpenAI 兼容的 Sora API 服务
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/fastapi-0.119.0-green.svg)](https://fastapi.tiangolo.com/)
-[![Docker](https://img.shields.io/badge/docker-supported-blue.svg)](https://www.docker.com/)
-
-**一个功能完整的 OpenAI 兼容 API 服务，为 Sora 提供统一的接口**
-
-</div>
-
----
-
-## 📋 目录
-
-- [功能特性](#功能特性)
-- [快速开始](#快速开始)
-- [使用指南](#使用指南)
-  - [快速参考](#快速参考)
-  - [管理后台](#管理后台)
-  - [API 调用](#api-调用)
-  - [视频角色功能](#视频角色功能)
-- [许可证](#许可证)
-
----
-
-## ✨ 功能特性
-
-### 核心功能
-- 🎨 **文生图** - 根据文本描述生成图片
-- 🖼️ **图生图** - 基于上传的图片进行创意变换
-- 🎬 **文生视频** - 根据文本描述生成视频
-- 🎥 **图生视频** - 基于图片生成相关视频
-- 📊 **多尺寸支持** - 横屏、竖屏等多种规格
-- 🎭 **视频角色功能** - 创建角色，生成角色视频
-- 🎬 **Remix 功能** - 基于已有视频继续创作
-
-### 高级特性
-- 🔐 **Token 管理** - 支持多 Token 管理和轮询负载均衡
-- 🌐 **代理支持** - 支持 HTTP 和 SOCKS5 代理
-- 📝 **详细日志** - 完整的请求/响应日志记录
-- 🔄 **异步处理** - 高效的异步任务处理
-- 💾 **数据持久化** - SQLite 数据库存储
-- 🎯 **OpenAI 兼容** - 完全兼容 OpenAI API 格式
-- 🛡️ **安全认证** - API Key 验证和权限管理
-- 📱 **Web 管理界面** - 直观的管理后台
-
----
-
-## 🚀 快速开始
-
-### 前置要求
-
-- Docker 和 Docker Compose（推荐）
-- 或 Python 3.8+
-
-### 方式一：Docker 部署（推荐）
-
-#### 标准模式（不使用代理）
+## 快速开始
 
 ```bash
-# 克隆项目
-git clone https://github.com/TheSmallHanCat/sora2api.git
-cd sora2api
-
-# 启动服务
+# Docker 部署
 docker-compose up -d
 
-# 查看日志
-docker-compose logs -f
-```
-
-#### WARP 模式（使用代理）
-
-```bash
-# 使用 WARP 代理启动
-docker-compose -f docker-compose.warp.yml up -d
-
-# 查看日志
-docker-compose -f docker-compose.warp.yml logs -f
-```
-
-### 方式二：本地部署
-
-```bash
-# 克隆项目
-git clone https://github.com/TheSmallHanCat/sora2api.git
-cd sora2api
-
-# 创建虚拟环境
-python -m venv venv
-
-# 激活虚拟环境
-# Windows
-venv\Scripts\activate
-# Linux/Mac
-source venv/bin/activate
-
-# 安装依赖
+# 本地部署
 pip install -r requirements.txt
-
-# 启动服务
 python main.py
 ```
 
-### 首次启动
-
-服务启动后，访问管理后台进行初始化配置：
-
-- **地址**: http://localhost:8000
-- **用户名**: `admin`
-- **密码**: `admin`
-
-⚠️ **重要**: 首次登录后请立即修改密码！
+**管理后台**: http://localhost:8000 (默认账号: admin/admin)
 
 ---
 
-### 快速参考
+## API 说明
 
-| 功能 | 模型 | 说明 |
-|------|------|------|
-| 文生图 | `sora-image*` | 使用 `content` 为字符串 |
-| 图生图 | `sora-image*` | 使用 `content` 数组 + `image_url` |
-| 文生视频 | `sora-video*` | 使用 `content` 为字符串 |
-| 图生视频 | `sora-video*` | 使用 `content` 数组 + `image_url` |
-| 创建角色 | `sora-video*` | 使用 `content` 数组 + `video_url` |
-| 角色生成视频 | `sora-video*` | 使用 `content` 数组 + `video_url` + 文本 |
-| Remix | `sora-video*` | 在 `content` 中包含 Remix ID |
-| 视频分镜 | `sora-video*` | 在 `content` 中使用```[时长s]提示词```格式触发 |
+### 基本信息
 
----
+- **接口端点**: `POST /v1/chat/completions`
+- **身份验证**: `Authorization: Bearer YOUR_API_KEY`
+- **默认 API Key**: `han1234`
 
-### API 调用
+### 请求参数
 
-#### 基本信息（OpenAI标准格式，需要使用流式）
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `model` | string | 是 | 模型名称 |
+| `messages` | array | 是 | 消息数组 |
+| `stream` | boolean | 否 | 是否流式输出，默认 false |
+| `style_id` | string | 否 | 视频风格 |
+| `character_options` | object | 否 | 角色创建选项 |
 
-- **端点**: `http://localhost:8000/v1/chat/completions`
-- **认证**: 在请求头中添加 `Authorization: Bearer YOUR_API_KEY`
-- **默认 API Key**: `han1234`（建议修改）
-
-#### 支持的模型
+### 支持的模型
 
 **图片模型**
 
-| 模型 | 说明 | 尺寸 |
-|------|------|------|
-| `sora-image` | 文生图（默认） | 360×360 |
-| `sora-image-landscape` | 文生图（横屏） | 540×360 |
-| `sora-image-portrait` | 文生图（竖屏） | 360×540 |
+| 模型名称 | 尺寸 |
+|------|------|
+| `sora-image` | 360x360 |
+| `sora-image-landscape` | 540x360 |
+| `sora-image-portrait` | 360x540 |
 
 **视频模型**
 
-| 模型 | 时长 | 方向 | 说明 |
-|------|------|------|------|
-| `sora-video-10s` | 10秒 | 横屏 | 文生视频/图生视频 |
-| `sora-video-15s` | 15秒 | 横屏 | 文生视频/图生视频 |
-| `sora-video-landscape-10s` | 10秒 | 横屏 | 文生视频/图生视频 |
-| `sora-video-landscape-15s` | 15秒 | 横屏 | 文生视频/图生视频 |
-| `sora-video-portrait-10s` | 10秒 | 竖屏 | 文生视频/图生视频 |
-| `sora-video-portrait-15s` | 15秒 | 竖屏 | 文生视频/图生视频 |
+| 模型名称 | 时长 | 方向 |
+|------|------|------|
+| `sora-video-10s` | 10秒 | 方形 |
+| `sora-video-15s` | 15秒 | 方形 |
+| `sora-video-landscape-10s` | 10秒 | 横屏 |
+| `sora-video-landscape-15s` | 15秒 | 横屏 |
+| `sora-video-portrait-10s` | 10秒 | 竖屏 |
+| `sora-video-portrait-15s` | 15秒 | 竖屏 |
 
-#### 请求示例
+### 视频风格 (style_id)
 
-**文生图**
+| 风格 | 值 |
+|------|------|
+| 节日 | `festive` |
+| 复古 | `retro` |
+| 新闻 | `news` |
+| 自拍 | `selfie` |
+| 手持 | `handheld` |
+| 动漫 | `anime` |
 
+---
+
+## 流式响应格式说明
+
+### reasoning_content 结构
+
+流式响应中的 `reasoning_content` 字段为结构化 JSON 对象，包含以下字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `stage` | string | 当前处理阶段 |
+| `status` | string | 当前状态 |
+| `progress` | number | 进度百分比 (0-100)，可选 |
+| `message` | string | 人类可读的状态消息 |
+| `details` | object | 额外详情，可选 |
+| `timestamp` | number | Unix 时间戳 |
+
+### stage 阶段值
+
+| 值 | 说明 |
+|------|------|
+| `upload` | 上传媒体文件 |
+| `generation` | 生成图片/视频 |
+| `cache` | 缓存文件 |
+| `character_creation` | 创建角色 |
+| `remix` | 混剪视频 |
+| `watermark_free` | 去水印处理 |
+| `storyboard` | 故事板模式 |
+| `error` | 错误状态 |
+| `processing` | 通用处理中 |
+
+### status 状态值
+
+| 值 | 说明 |
+|------|------|
+| `started` | 阶段开始 |
+| `processing` | 处理中 |
+| `completed` | 阶段完成 |
+| `error` | 发生错误 |
+
+### content 结果格式
+
+最终结果通过 `content` 字段返回，为 JSON 字符串格式。
+
+#### 图片生成结果
+
+```json
+{
+  "type": "image",
+  "urls": ["http://localhost:8000/tmp/xxx.png"],
+  "count": 1,
+  "data": [
+    {"url": "http://localhost:8000/tmp/xxx.png"}
+  ]
+}
+```
+
+> `data` 字段兼容 OpenAI Images API 格式
+
+#### 视频生成结果
+
+```json
+{
+  "type": "video",
+  "url": "http://localhost:8000/tmp/xxx.mp4",
+  "data": [
+    {
+      "url": "http://localhost:8000/tmp/xxx.mp4",
+      "revised_prompt": null
+    }
+  ]
+}
+```
+
+> `data` 字段兼容 OpenAI Sora API 格式
+
+#### 角色创建结果
+
+```json
+{
+  "type": "character",
+  "username": "mycharacter123",
+  "display_name": "我的角色",
+  "cameo_id": "cameo_xxx",
+  "character_id": "char_xxx",
+  "data": {
+    "username": "mycharacter123",
+    "display_name": "我的角色",
+    "cameo_id": "cameo_xxx",
+    "character_id": "char_xxx"
+  }
+}
+```
+
+#### 错误结果
+
+```json
+{
+  "type": "error",
+  "error": "Content policy violation: ...",
+  "data": {
+    "error": "Content policy violation: ..."
+  }
+}
+```
+
+### 解析示例 (Python)
+
+```python
+import json
+
+def parse_stream_response(line: str):
+    """解析流式响应行"""
+    if not line.startswith("data: "):
+        return None
+    
+    data_str = line[6:]  # 移除 "data: " 前缀
+    if data_str == "[DONE]":
+        return {"done": True}
+    
+    data = json.loads(data_str)
+    delta = data["choices"][0]["delta"]
+    
+    # 解析 reasoning_content (进度信息)
+    reasoning = delta.get("reasoning_content")
+    if reasoning:
+        stage = reasoning.get("stage")
+        status = reasoning.get("status")
+        progress = reasoning.get("progress")
+        message = reasoning.get("message")
+        details = reasoning.get("details")
+        
+        print(f"[{stage}] {status}: {message}")
+        if progress is not None:
+            print(f"  Progress: {progress}%")
+        if details:
+            print(f"  Details: {details}")
+    
+    # 解析 content (最终结果 - JSON 格式)
+    content = delta.get("content")
+    if content:
+        result = json.loads(content)
+        result_type = result.get("type")
+        
+        if result_type == "image":
+            print(f"图片生成成功: {result['count']} 张")
+            for item in result["data"]:
+                print(f"  URL: {item['url']}")
+        
+        elif result_type == "video":
+            print(f"视频生成成功: {result['url']}")
+        
+        elif result_type == "character":
+            print(f"角色创建成功: @{result['username']} ({result['display_name']})")
+            print(f"  cameo_id: {result['cameo_id']}")
+            print(f"  character_id: {result['character_id']}")
+        
+        elif result_type == "error":
+            print(f"生成失败: {result['error']}")
+    
+    return data
+
+# 使用示例
+for line in response.iter_lines():
+    if line:
+        parse_stream_response(line.decode())
+```
+
+### 解析示例 (JavaScript)
+
+```javascript
+async function parseStreamResponse(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    
+    const lines = decoder.decode(value).split('\n');
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      
+      const dataStr = line.slice(6);
+      if (dataStr === '[DONE]') {
+        console.log('Stream completed');
+        continue;
+      }
+      
+      const data = JSON.parse(dataStr);
+      const delta = data.choices[0].delta;
+      
+      // 解析 reasoning_content (进度信息)
+      const reasoning = delta.reasoning_content;
+      if (reasoning) {
+        console.log(`[${reasoning.stage}] ${reasoning.status}: ${reasoning.message}`);
+        if (reasoning.progress !== undefined) {
+          console.log(`  Progress: ${reasoning.progress}%`);
+        }
+        if (reasoning.details) {
+          console.log('  Details:', reasoning.details);
+        }
+      }
+      
+      // 解析 content (最终结果 - JSON 格式)
+      if (delta.content) {
+        const result = JSON.parse(delta.content);
+        
+        switch (result.type) {
+          case 'image':
+            console.log(`图片生成成功: ${result.count} 张`);
+            result.data.forEach(item => console.log(`  URL: ${item.url}`));
+            break;
+          case 'video':
+            console.log(`视频生成成功: ${result.url}`);
+            break;
+          case 'character':
+            console.log(`角色创建成功: @${result.username} (${result.display_name})`);
+            console.log(`  cameo_id: ${result.cameo_id}`);
+            console.log(`  character_id: ${result.character_id}`);
+            break;
+          case 'error':
+            console.log(`生成失败: ${result.error}`);
+            break;
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+## 接口示例
+
+### 1. 文生图片
+
+**请求**
+```json
+{
+  "model": "sora-image",
+  "messages": [
+    {
+      "role": "user",
+      "content": "一只可爱的小猫"
+    }
+  ],
+  "stream": true
+}
+```
+
+**响应 (流式)**
+
+流式响应包含两种类型的数据：
+- `reasoning_content`: 结构化的处理进度信息 (JSON 对象)
+- `content`: 最终生成结果
+
+```
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234567890,"model":"sora","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":{"stage":"generation","status":"started","message":"Initializing generation request...","timestamp":1234567890},"tool_calls":null},"finish_reason":null,"native_finish_reason":null}],"usage":{"prompt_tokens":0}}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234567890,"model":"sora","choices":[{"index":0,"delta":{"content":null,"reasoning_content":{"stage":"generation","status":"processing","progress":50,"message":"Image generation in progress: 50% completed...","timestamp":1234567890},"tool_calls":null},"finish_reason":null,"native_finish_reason":null}],"usage":{"prompt_tokens":0}}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234567890,"model":"sora","choices":[{"index":0,"delta":{"content":"![Generated Image](http://localhost:8000/tmp/xxx.png)","reasoning_content":null,"tool_calls":null},"finish_reason":"STOP","native_finish_reason":"STOP"}],"usage":{"prompt_tokens":0,"completion_tokens":1,"total_tokens":1}}
+
+data: [DONE]
+```
+
+**curl**
 ```bash
 curl -X POST "http://localhost:8000/v1/chat/completions" \
   -H "Authorization: Bearer han1234" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "sora-image",
+    "messages": [{"role": "user", "content": "一只可爱的小猫"}],
+    "stream": true
+  }'
+```
+
+---
+
+### 2. 文生视频
+
+**请求**
+```json
+{
+  "model": "sora-video-landscape-10s",
+  "messages": [
+    {
+      "role": "user",
+      "content": "一只猫在弹钢琴"
+    }
+  ],
+  "stream": true,
+  "style_id": "anime"
+}
+```
+
+**curl**
+```bash
+curl -X POST "http://localhost:8000/v1/chat/completions" \
+  -H "Authorization: Bearer han1234" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "sora-video-landscape-10s",
+    "messages": [{"role": "user", "content": "一只猫在弹钢琴"}],
+    "stream": true,
+    "style_id": "anime"
+  }'
+```
+
+---
+
+### 3. 图生视频
+
+**请求**
+```json
+{
+  "model": "sora-video-landscape-10s",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "让图片动起来"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgo..."
+          }
+        }
+      ]
+    }
+  ],
+  "stream": true
+}
+```
+
+**说明**
+- 图片可以通过 base64 编码传入
+- 也支持 URL 形式: `{"url": "https://example.com/image.png"}`
+
+---
+
+### 4. 视频 Remix（基于已有视频继续创作）
+
+提示词内包含 Sora 分享链接或 ID 即可触发 Remix 模式。
+
+**请求**
+```json
+{
+  "model": "sora-video-landscape-10s",
+  "messages": [
+    {
+      "role": "user",
+      "content": "https://sora.chatgpt.com/p/s_68e3a06dcd888191b150971da152c1f5 改成水墨画风格"
+    }
+  ],
+  "stream": true
+}
+```
+
+**curl**
+```bash
+curl -X POST "http://localhost:8000/v1/chat/completions" \
+  -H "Authorization: Bearer han1234" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "sora-video-landscape-10s",
     "messages": [
       {
         "role": "user",
-        "content": "一只可爱的小猫咪"
+        "content": "https://sora.chatgpt.com/p/s_68e3a06dcd888191b150971da152c1f5 改成水墨画风格"
       }
     ]
   }'
 ```
 
-**图生图**
+**说明**
+- 支持完整分享链接: `https://sora.chatgpt.com/p/s_xxx`
+- 支持分享 ID: `s_xxx`
+- Remix 会基于原视频进行二次创作
 
-```bash
-curl -X POST "http://localhost:8000/v1/chat/completions" \
-  -H "Authorization: Bearer han1234" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "sora-image",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "text",
-            "text": "将这张图片变成油画风格"
-          },
-          {
-            "type": "image_url",
-            "image_url": {
-              "url": "data:image/png;base64,<base64_encoded_image_data>"
-            }
-          }
-        ]
-      }
-    ],
-    "stream": true
-  }'
+---
+
+### 5. 视频分镜（Storyboard）
+
+使用 `[时长]提示词` 格式触发分镜模式，可以精确控制每个片段的时长和内容。
+
+**请求**
+```json
+{
+  "model": "sora-video-landscape-10s",
+  "messages": [
+    {
+      "role": "user",
+      "content": "[5.0s]猫猫从飞机上跳伞 [5.0s]猫猫降落 [10.0s]猫猫在田野奔跑"
+    }
+  ],
+  "stream": true
+}
 ```
 
-**文生视频**
-
-```bash
-curl -X POST "http://localhost:8000/v1/chat/completions" \
-  -H "Authorization: Bearer han1234" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "sora-video-landscape-10s",
-    "messages": [
-      {
-        "role": "user",
-        "content": "一只小猫在草地上奔跑"
-      }
-    ],
-    "stream": true
-  }'
-```
-
-**图生视频**
-
-```bash
-curl -X POST "http://localhost:8000/v1/chat/completions" \
-  -H "Authorization: Bearer han1234" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "sora-video-landscape-10s",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "text",
-            "text": "这只猫在跳舞"
-          },
-          {
-            "type": "image_url",
-            "image_url": {
-              "url": "data:image/png;base64,<base64_encoded_image_data>"
-            }
-          }
-        ]
-      }
-    ],
-    "stream": true
-  }'
-```
-
-**视频Remix（基于已有视频继续创作）**
-
-* 提示词内包含remix分享链接或id即可
-
-```bash
-curl -X POST "http://localhost:8000/v1/chat/completions" \
-  -H "Authorization: Bearer han1234" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "sora-video-landscape-10s",
-    "messages": [
-      {
-        "role": "user",
-        "content": "https://sora.chatgpt.com/p/s_68e3a06dcd888191b150971da152c1f5改成水墨画风格"
-      }
-    ]
-  }'
-```
-
-**视频分镜**
-
-* 示例触发提示词：
-  ```[5.0s]猫猫从飞机上跳伞 [5.0s]猫猫降落 [10.0s]猫猫在田野奔跑```
-* 或
-  ```text
-  [5.0s]猫猫从飞机上跳伞
-  [5.0s]猫猫降落
-  [10.0s]猫猫在田野奔跑
-  ```
-
+**curl**
 ```bash
 curl -X POST "http://localhost:8000/v1/chat/completions" \
   -H "Authorization: Bearer han1234" \
@@ -301,137 +492,197 @@ curl -X POST "http://localhost:8000/v1/chat/completions" \
   }'
 ```
 
-### 视频角色功能
+**说明**
+- 格式: `[时长s]提示词`，例如 `[5.0s]场景描述`
+- 支持多行格式或空格分隔
+- 每个片段可以设置不同的时长 (5s, 10s, 15s, 20s)
 
-Sora2API 支持**视频角色生成**功能。
+---
 
-#### 功能说明
+### 6. 创建角色
 
-- **角色创建**: 如果只有视频，无prompt，则生成角色自动提取角色信息，输出角色名
-- **角色生成**: 有视频、prompt，则上传视频创建角色，使用角色和prompt进行生成，输出视频
-
-#### API调用（OpenAI标准格式，需要使用流式）
-
-**场景 1: 仅创建角色（不生成视频）**
-
-上传视频提取角色信息，获取角色名称和头像。
-
-```bash
-curl -X POST "http://localhost:8000/v1/chat/completions" \
-  -H "Authorization: Bearer han1234" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "sora-video-landscape-10s",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "video_url",
-            "video_url": {
-              "url": "data:video/mp4;base64,<base64_encoded_video_data>"
-            }
+**请求**
+```json
+{
+  "model": "sora-video-landscape-10s",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "video_url",
+          "video_url": {
+            "url": "data:video/mp4;base64,..."
           }
-        ]
-      }
-    ],
-    "stream": true
-  }'
+        }
+      ]
+    }
+  ],
+  "stream": true,
+  "character_options": {
+    "username": "my_character",
+    "display_name": "我的角色"
+  }
+}
 ```
 
-**场景 2: 创建角色并生成视频**
+---
 
-上传视频创建角色，然后使用该角色生成新视频。
+### 7. 获取模型列表
 
+**请求**
 ```bash
-curl -X POST "http://localhost:8000/v1/chat/completions" \
-  -H "Authorization: Bearer han1234" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "sora-video-landscape-10s",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "video_url",
-            "video_url": {
-              "url": "data:video/mp4;base64,<base64_encoded_video_data>"
-            }
-          },
-          {
-            "type": "text",
-            "text": "角色做一个跳舞的动作"
-          }
-        ]
-      }
-    ],
-    "stream": true
-  }'
+curl -X GET "http://localhost:8000/v1/models" \
+  -H "Authorization: Bearer han1234"
 ```
 
-#### Python 代码示例
+**响应**
+```json
+{
+  "object": "list",
+  "data": [
+    {"id": "sora-image", "object": "model", "owned_by": "openai"},
+    {"id": "sora-video-landscape-10s", "object": "model", "owned_by": "openai"}
+  ]
+}
+```
+
+---
+
+### 7. Token 管理
+
+**获取 Token 列表**
+```bash
+curl -X GET "http://localhost:8000/api/tokens" \
+  -H "Authorization: Bearer han1234"
+```
+
+**添加 Token**
+```bash
+curl -X POST "http://localhost:8000/api/tokens" \
+  -H "Authorization: Bearer han1234" \
+  -H "Content-Type: application/json" \
+  -d '{"token": "your_sora_token_here"}'
+```
+
+**删除 Token**
+```bash
+curl -X DELETE "http://localhost:8000/api/tokens/1" \
+  -H "Authorization: Bearer han1234"
+```
+
+---
+
+### 8. 搜索用户/角色
+
+**请求**
+```bash
+curl -X GET "http://localhost:8000/api/characters/search?username=test&intent=cameo&limit=10" \
+  -H "Authorization: Bearer han1234"
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `username` | string | 否 | 搜索的用户名关键字 |
+| `intent` | string | 否 | `users` (所有用户，默认) 或 `cameo` (可用于视频生成的角色) |
+| `token_id` | int | 否 | 指定使用的 Token ID |
+| `limit` | int | 否 | 返回数量，默认 10 |
+
+---
+
+### 9. 获取公共 Feed
+
+**请求**
+```bash
+curl -X GET "http://localhost:8000/api/feed?limit=8&cut=nf2_latest" \
+  -H "Authorization: Bearer han1234"
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `limit` | int | 否 | 返回数量，默认 8 |
+| `cut` | string | 否 | `nf2_latest` (最新，默认) 或 `nf2_top` (热门) |
+| `cursor` | string | 否 | 分页游标 |
+| `token_id` | int | 否 | 指定使用的 Token ID |
+
+---
+
+### 10. 获取 Token 发布内容
+
+**请求**
+```bash
+curl -X GET "http://localhost:8000/api/tokens/1/profile-feed?limit=12" \
+  -H "Authorization: Bearer han1234"
+```
+
+---
+
+## Python 示例
 
 ```python
 import requests
 import base64
 
-# 读取视频文件并编码为 Base64
-with open("video.mp4", "rb") as f:
-    video_data = base64.b64encode(f.read()).decode("utf-8")
+API_URL = "http://localhost:8000/v1/chat/completions"
+API_KEY = "han1234"
 
-# 仅创建角色
-response = requests.post(
-    "http://localhost:8000/v1/chat/completions",
-    headers={
-        "Authorization": "Bearer han1234",
-        "Content-Type": "application/json"
-    },
-    json={
-        "model": "sora-video-landscape-10s",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "video_url",
-                        "video_url": {
-                            "url": f"data:video/mp4;base64,{video_data}"
-                        }
-                    }
-                ]
-            }
-        ],
-        "stream": True
-    },
-    stream=True
-)
+headers = {
+    "Authorization": f"Bearer {API_KEY}",
+    "Content-Type": "application/json"
+}
 
-# 处理流式响应
+# 文生视频
+response = requests.post(API_URL, headers=headers, json={
+    "model": "sora-video-landscape-10s",
+    "messages": [{"role": "user", "content": "一只猫在跳舞"}],
+    "stream": True,
+    "style_id": "anime"
+}, stream=True)
+
 for line in response.iter_lines():
     if line:
-        print(line.decode("utf-8"))
+        print(line.decode())
+
+# 图生视频
+with open("image.png", "rb") as f:
+    image_b64 = base64.b64encode(f.read()).decode()
+
+response = requests.post(API_URL, headers=headers, json={
+    "model": "sora-video-landscape-10s",
+    "messages": [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "让图片动起来"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}}
+        ]
+    }],
+    "stream": True
+}, stream=True)
+
+for line in response.iter_lines():
+    if line:
+        print(line.decode())
 ```
 
 ---
 
-## 📄 许可证
+## 测试脚本
 
-本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
+在 `tests/` 目录下提供了测试脚本：
 
----
+```bash
+# 测试搜索角色 API
+python tests/test_search_characters.py
 
-## 🙏 致谢
+# 测试公共 Feed API
+python tests/test_public_feed.py
 
-感谢所有贡献者和使用者的支持！
-
----
-
-## 📞 联系方式
-
-- 提交 Issue：[GitHub Issues](https://github.com/TheSmallHanCat/sora2api/issues)
-- 讨论：[GitHub Discussions](https://github.com/TheSmallHanCat/sora2api/discussions)
+# 测试 Token 发布内容 API
+python tests/test_token_feed.py
+```
 
 ---
 
-**⭐ 如果这个项目对你有帮助，请给个 Star！**
+## 许可证
+
+MIT License

@@ -85,6 +85,8 @@ async def create_chat_completion(
         image_data = request.image  # Default to request.image if provided
         video_data = request.video  # Video parameter
         remix_target_id = request.remix_target_id  # Remix target ID
+        character_options = request.character_options  # Character creation options
+        style_id = request.style_id  # Video style
 
         if isinstance(content, str):
             # Simple string format
@@ -146,7 +148,9 @@ async def create_chat_completion(
                     image=image_data,
                     video=video_data,
                     remix_target_id=remix_target_id,
-                    stream=False
+                    stream=False,
+                    character_options=character_options,
+                    style_id=style_id
                 ):
                     result = chunk
 
@@ -177,7 +181,9 @@ async def create_chat_completion(
                         image=image_data,
                         video=video_data,
                         remix_target_id=remix_target_id,
-                        stream=True
+                        stream=True,
+                        character_options=character_options,
+                        style_id=style_id
                     ):
                         yield chunk
                 except Exception as e:
@@ -212,7 +218,9 @@ async def create_chat_completion(
                 image=image_data,
                 video=video_data,
                 remix_target_id=remix_target_id,
-                stream=False
+                stream=False,
+                character_options=character_options,
+                style_id=style_id
             ):
                 result = chunk
 

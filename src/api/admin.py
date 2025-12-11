@@ -896,3 +896,141 @@ async def update_at_auto_refresh_enabled(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update AT auto refresh enabled status: {str(e)}")
+
+# Character (角色卡) management endpoints
+class CharacterUpdateRequest(BaseModel):
+    instruction_set: Optional[str] = None
+    safety_instruction_set: Optional[str] = None
+    visibility: Optional[str] = None
+
+@router.get("/api/characters")
+async def list_characters(token: str = Depends(verify_admin_token)):
+    """List all characters"""
+    try:
+        characters = await db.get_all_characters()
+        return {
+            "success": True,
+            "characters": [char.model_dump() for char in characters]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list characters: {str(e)}")
+
+@router.get("/api/characters/by-token/{token_id}")
+async def list_characters_by_token(token_id: int, token: str = Depends(verify_admin_token)):
+    """List characters for a specific token"""
+    try:
+        characters = await db.get_characters_by_token_id(token_id)
+        return {
+            "success": True,
+            "characters": [char.model_dump() for char in characters]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list characters: {str(e)}")
+
+@router.get("/api/characters/{cameo_id}")
+async def get_character(cameo_id: str, token: str = Depends(verify_admin_token)):
+    """Get character by cameo_id"""
+    try:
+        character = await db.get_character_by_cameo_id(cameo_id)
+        if not character:
+            raise HTTPException(status_code=404, detail="Character not found")
+        return {
+            "success": True,
+            "character": character.model_dump()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get character: {str(e)}")
+
+@router.post("/api/characters/{cameo_id}/update")
+async def update_character_instructions(
+    cameo_id: str,
+    request: CharacterUpdateRequest,
+    token: str = Depends(verify_admin_token)
+):
+    """Update character instruction_set and safety_instruction_set via Sora API"""
+    try:
+        # Get character from database to find associated token
+        character = await db.get_character_by_cameo_id(cameo_id)
+        if not character:
+            raise HTTPException(status_code=404, detail="Character not found in database")
+        
+        # Get the token for this character
+        token_obj = await token_manager.get_token_by_id(character.token_id)
+        if not token_obj:
+            raise HTTPException(status_code=404, detail="Associated token not found")
+        
+        # Call Sora API to update character
+        result = await generation_handler.sora_client.update_character_instructions(
+            cameo_id=cameo_id,
+            token=token_obj.token,
+            instruction_set=request.instruction_set,
+            safety_instruction_set=request.safety_instruction_set,
+            visibility=request.visibility
+        )
+        
+        # Update local database
+        update_fields = {}
+        if request.instruction_set is not None:
+            update_fields['instruction_set'] = request.instruction_set
+        if request.safety_instruction_set is not None:
+            update_fields['safety_instruction_set'] = request.safety_instruction_set
+        if request.visibility is not None:
+            update_fields['visibility'] = request.visibility
+        
+        if update_fields:
+            await db.update_character(cameo_id, **update_fields)
+        
+        return {
+            "success": True,
+            "message": "Character updated successfully",
+            "result": result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update character: {str(e)}")
+
+@router.delete("/api/characters/{cameo_id}")
+async def delete_character(cameo_id: str, token: str = Depends(verify_admin_token)):
+    """Delete character from database (does not delete from Sora)"""
+    try:
+        success = await db.delete_character(cameo_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Character not found")
+        return {
+            "success": True,
+            "message": "Character deleted from database"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete character: {str(e)}")
+
+# Token characters endpoint (get characters from Sora API)
+@router.get("/api/tokens/{token_id}/sora-characters")
+async def get_token_sora_characters(
+    token_id: int,
+    token: str = Depends(verify_admin_token)
+):
+    """Get characters from Sora API for a specific token"""
+    try:
+        # Get the token
+        token_obj = await token_manager.get_token_by_id(token_id)
+        if not token_obj:
+            raise HTTPException(status_code=404, detail="Token not found")
+        
+        # Get characters from Sora API (via profile feed or dedicated endpoint if available)
+        # For now, we return local database characters
+        characters = await db.get_characters_by_token_id(token_id)
+        
+        return {
+            "success": True,
+            "token_id": token_id,
+            "characters": [char.model_dump() for char in characters]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get characters: {str(e)}")

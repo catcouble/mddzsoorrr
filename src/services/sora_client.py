@@ -178,7 +178,19 @@ class SoraClient:
 
             # Check status
             if response.status_code not in [200, 201]:
-                error_msg = f"API request failed: {response.status_code} - {response.text}"
+                # Try to extract error message from response JSON
+                error_detail = None
+                if response_json and isinstance(response_json, dict):
+                    error_obj = response_json.get("error", {})
+                    if isinstance(error_obj, dict):
+                        error_detail = error_obj.get("message")
+                
+                # Use extracted error message or fall back to raw response
+                if error_detail:
+                    error_msg = f"{error_detail}"
+                else:
+                    error_msg = f"API request failed: {response.status_code} - {response.text}"
+                
                 debug_logger.log_error(
                     error_message=error_msg,
                     status_code=response.status_code,
@@ -191,6 +203,78 @@ class SoraClient:
     async def get_user_info(self, token: str) -> Dict[str, Any]:
         """Get user information"""
         return await self._make_request("GET", "/me", token)
+
+    async def get_profile_feed(self, token: str, limit: int = 8) -> Dict[str, Any]:
+        """Get user's profile feed (published posts)
+
+        Args:
+            token: Access token
+            limit: Number of items to fetch (default 8)
+
+        Returns:
+            Profile feed data with items array
+        """
+        return await self._make_request("GET", f"/project_y/profile_feed/me?limit={limit}&cut=nf2", token)
+
+    async def get_user_profile(self, username: str, token: str) -> Dict[str, Any]:
+        """Get user profile by username
+        
+        Args:
+            username: Username to lookup
+            token: Access token
+            
+        Returns:
+            User profile data
+        """
+        return await self._make_request("GET", f"/project_y/profile/username/{username}", token)
+
+    async def get_user_feed(self, user_id: str, token: str, limit: int = 8, cursor: str = None) -> Dict[str, Any]:
+        """Get user's published posts by user_id
+        
+        Args:
+            user_id: User ID (e.g., user-4qluo8ATzeEsuvCpOUAfAZY0)
+            token: Access token
+            limit: Number of items to fetch (default 8)
+            cursor: Pagination cursor for next page
+            
+        Returns:
+            User's feed data with items array and cursor
+        """
+        url = f"/project_y/profile_feed/{user_id}?limit={limit}&cut=nf2"
+        if cursor:
+            url = f"/project_y/profile_feed/{user_id}?cursor={cursor}&limit={limit}&cut=nf2"
+        return await self._make_request("GET", url, token)
+
+    async def search_character(self, username: str, token: str, limit: int = 10, intent: str = "users") -> Dict[str, Any]:
+        """Search for character/user by username
+
+        Args:
+            username: Username to search for
+            token: Access token
+            limit: Number of results to return (default 10)
+            intent: Search intent - 'users' for all users, 'cameo' for users that can be used in video generation
+
+        Returns:
+            Search results with profile information
+        """
+        return await self._make_request("GET", f"/project_y/profile/search_mentions?username={username}&intent={intent}&limit={limit}", token)
+
+    async def get_public_feed(self, token: str, limit: int = 8, cut: str = "nf2_latest", cursor: str = None) -> Dict[str, Any]:
+        """Get public feed (latest or top posts)
+
+        Args:
+            token: Access token
+            limit: Number of items to fetch (default 8)
+            cut: Feed type - 'nf2_latest' for latest, 'nf2_top' for top posts, 'nf2' for default
+            cursor: Pagination cursor for next page
+
+        Returns:
+            Feed data with items array and cursor for pagination
+        """
+        url = f"/project_y/feed?limit={limit}&cut={cut}"
+        if cursor:
+            url = f"/project_y/feed?cursor={cursor}&limit={limit}&cut={cut}"
+        return await self._make_request("GET", url, token)
     
     async def upload_image(self, image_data: bytes, token: str, filename: str = "image.png") -> str:
         """Upload image and return media_id
@@ -254,8 +338,18 @@ class SoraClient:
         return result["id"]
     
     async def generate_video(self, prompt: str, token: str, orientation: str = "landscape",
-                            media_id: Optional[str] = None, n_frames: int = 450) -> str:
-        """Generate video (text-to-video or image-to-video)"""
+                            media_id: Optional[str] = None, n_frames: int = 450,
+                            style_id: Optional[str] = None) -> str:
+        """Generate video (text-to-video or image-to-video)
+        
+        Args:
+            prompt: Generation prompt
+            token: Access token
+            orientation: Video orientation (portrait/landscape)
+            media_id: Optional media ID for image-to-video
+            n_frames: Number of frames (150=5s, 300=10s, 450=15s, 600=20s)
+            style_id: Optional style ID (festive, retro, news, selfie, handheld, anime)
+        """
         inpaint_items = []
         if media_id:
             inpaint_items = [{
@@ -272,6 +366,10 @@ class SoraClient:
             "model": "sy_8",
             "inpaint_items": inpaint_items
         }
+        
+        # Add style_id if provided
+        if style_id:
+            json_data["style_id"] = style_id.lower()
 
         # 生成请求需要添加 sentinel token
         result = await self._make_request("POST", "/nf/create", token, json_data=json_data, add_sentinel_token=True)
@@ -483,12 +581,13 @@ class SoraClient:
 
     # ==================== Character Creation Methods ====================
 
-    async def upload_character_video(self, video_data: bytes, token: str) -> str:
+    async def upload_character_video(self, video_data: bytes, token: str, timestamps: str = None) -> str:
         """Upload character video and return cameo_id
 
         Args:
             video_data: Video file bytes
             token: Access token
+            timestamps: Optional custom timestamps (e.g., "0,3" or "1,5"), defaults to "0,3"
 
         Returns:
             cameo_id
@@ -500,9 +599,11 @@ class SoraClient:
             filename="video.mp4",
             data=video_data
         )
+        # Use custom timestamps if provided, otherwise default to "0,3"
+        ts_value = timestamps if timestamps else "0,3"
         mp.addpart(
             name="timestamps",
-            data=b"0,3"
+            data=ts_value.encode('utf-8')
         )
 
         result = await self._make_request("POST", "/characters/upload", token, multipart=mp)
@@ -546,7 +647,8 @@ class SoraClient:
             return response.content
 
     async def finalize_character(self, cameo_id: str, username: str, display_name: str,
-                                profile_asset_pointer: str, instruction_set, token: str) -> str:
+                                profile_asset_pointer: str, instruction_set, token: str,
+                                safety_instruction_set: str = None) -> str:
         """Finalize character creation
 
         Args:
@@ -554,26 +656,52 @@ class SoraClient:
             username: Character username
             display_name: Character display name
             profile_asset_pointer: Asset pointer from upload_character_image
-            instruction_set: Character instruction set (not used by API, always set to None)
+            instruction_set: Character instruction set text (optional, will be wrapped in proper format)
             token: Access token
+            safety_instruction_set: Safety instruction set text (optional, will be wrapped in proper format)
 
         Returns:
             character_id
         """
-        # Note: API always expects instruction_set to be null
-        # The instruction_set parameter is kept for backward compatibility but not used
-        _ = instruction_set  # Suppress unused parameter warning
+        # Format instruction_set if provided
+        formatted_instruction_set = None
+        if instruction_set:
+            formatted_instruction_set = {
+                "value": [{"type": "text", "value": instruction_set}]
+            }
+        
+        # Format safety_instruction_set if provided
+        formatted_safety_instruction_set = None
+        if safety_instruction_set:
+            formatted_safety_instruction_set = {
+                "value": [{"type": "text", "value": safety_instruction_set}]
+            }
+        
         json_data = {
             "cameo_id": cameo_id,
             "username": username,
             "display_name": display_name,
             "profile_asset_pointer": profile_asset_pointer,
-            "instruction_set": None,
-            "safety_instruction_set": None
+            "instruction_set": formatted_instruction_set,
+            "safety_instruction_set": formatted_safety_instruction_set
         }
 
         result = await self._make_request("POST", "/characters/finalize", token, json_data=json_data)
         return result.get("character", {}).get("character_id")
+
+    async def check_username_available(self, username: str, token: str) -> bool:
+        """Check if username is available
+
+        Args:
+            username: Username to check
+            token: Access token
+
+        Returns:
+            True if username is available, False otherwise
+        """
+        json_data = {"username": username}
+        result = await self._make_request("POST", "/project_y/profile/username/check", token, json_data=json_data)
+        return result.get("available", False)
 
     async def set_character_public(self, cameo_id: str, token: str) -> bool:
         """Set character as public
@@ -588,6 +716,40 @@ class SoraClient:
         json_data = {"visibility": "public"}
         await self._make_request("POST", f"/project_y/cameos/by_id/{cameo_id}/update_v2", token, json_data=json_data)
         return True
+
+    async def update_character_instructions(self, cameo_id: str, token: str,
+                                           instruction_set: str = None,
+                                           safety_instruction_set: str = None,
+                                           visibility: str = None) -> Dict[str, Any]:
+        """Update character instruction_set and safety_instruction_set
+
+        Args:
+            cameo_id: The cameo ID
+            token: Access token
+            instruction_set: Instruction set text (will be wrapped in proper format)
+            safety_instruction_set: Safety instruction set text (will be wrapped in proper format)
+            visibility: Visibility setting (public/private)
+
+        Returns:
+            Updated character info from API
+        """
+        json_data = {}
+        
+        if visibility:
+            json_data["visibility"] = visibility
+        
+        if instruction_set is not None:
+            json_data["instruction_set"] = {
+                "value": [{"type": "text", "value": instruction_set}]
+            }
+        
+        if safety_instruction_set is not None:
+            json_data["safety_instruction_set"] = {
+                "value": [{"type": "text", "value": safety_instruction_set}]
+            }
+        
+        result = await self._make_request("POST", f"/project_y/cameos/by_id/{cameo_id}/update_v2", token, json_data=json_data)
+        return result
 
     async def upload_character_image(self, image_data: bytes, token: str) -> str:
         """Upload character image and return asset_pointer

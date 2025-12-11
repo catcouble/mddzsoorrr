@@ -13,7 +13,7 @@ from .load_balancer import LoadBalancer
 from .file_cache import FileCache
 from .concurrency_manager import ConcurrencyManager
 from ..core.database import Database
-from ..core.models import Task, RequestLog
+from ..core.models import Task, RequestLog, CharacterOptions, Character
 from ..core.config import config
 from ..core.logger import debug_logger
 
@@ -137,6 +137,39 @@ class GenerationHandler:
 
         return final_username
 
+    async def _ensure_username_available(self, username: str, token: str, max_retries: int = 5) -> str:
+        """Ensure username is available, append random suffix if not
+
+        Args:
+            username: Desired username
+            token: Access token
+            max_retries: Maximum number of retries to find available username
+
+        Returns:
+            Available username (original or with random suffix)
+        """
+        # First check if original username is available
+        is_available = await self.sora_client.check_username_available(username, token)
+        if is_available:
+            debug_logger.log_info(f"Username '{username}' is available")
+            return username
+
+        # If not available, try adding random suffix
+        for attempt in range(max_retries):
+            random_suffix = str(random.randint(100, 999))
+            new_username = f"{username}{random_suffix}"
+            is_available = await self.sora_client.check_username_available(new_username, token)
+            if is_available:
+                debug_logger.log_info(f"Username '{username}' not available, using '{new_username}' instead")
+                return new_username
+            debug_logger.log_info(f"Username '{new_username}' not available, retrying... ({attempt + 1}/{max_retries})")
+
+        # If all retries failed, use timestamp-based username
+        timestamp_suffix = str(int(time.time()))[-6:]
+        final_username = f"{username}{timestamp_suffix}"
+        debug_logger.log_info(f"All retries failed, using timestamp-based username: {final_username}")
+        return final_username
+
     def _clean_remix_link_from_prompt(self, prompt: str) -> str:
         """Remove remix link from prompt
 
@@ -210,7 +243,9 @@ class GenerationHandler:
                                image: Optional[str] = None,
                                video: Optional[str] = None,
                                remix_target_id: Optional[str] = None,
-                               stream: bool = True) -> AsyncGenerator[str, None]:
+                               stream: bool = True,
+                               character_options: Optional[CharacterOptions] = None,
+                               style_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """Handle generation request
 
         Args:
@@ -220,6 +255,8 @@ class GenerationHandler:
             video: Base64 encoded video or video URL
             remix_target_id: Sora share link video ID for remix
             stream: Whether to stream response
+            character_options: Optional character creation options
+            style_id: Optional video style (festive, retro, news, selfie, handheld, anime)
         """
         start_time = time.time()
 
@@ -263,12 +300,12 @@ class GenerationHandler:
 
                 # If no prompt, just create character and return
                 if not prompt:
-                    async for chunk in self._handle_character_creation_only(video_data, model_config):
+                    async for chunk in self._handle_character_creation_only(video_data, model_config, character_options):
                         yield chunk
                     return
                 else:
                     # If prompt provided, create character and generate video
-                    async for chunk in self._handle_character_and_video_generation(video_data, prompt, model_config):
+                    async for chunk in self._handle_character_and_video_generation(video_data, prompt, model_config, character_options):
                         yield chunk
                     return
 
@@ -309,7 +346,9 @@ class GenerationHandler:
             if image:
                 if stream:
                     yield self._format_stream_chunk(
-                        reasoning_content="**Image Upload Begins**\n\nUploading image to server...\n",
+                        reasoning_content="Uploading image to server...",
+                        stage="upload",
+                        status="started",
                         is_first=is_first_chunk
                     )
                     is_first_chunk = False
@@ -319,20 +358,26 @@ class GenerationHandler:
 
                 if stream:
                     yield self._format_stream_chunk(
-                        reasoning_content="Image uploaded successfully. Proceeding to generation...\n"
+                        reasoning_content="Image uploaded successfully. Proceeding to generation...",
+                        stage="upload",
+                        status="completed"
                     )
 
             # Generate
             if stream:
                 if is_first_chunk:
                     yield self._format_stream_chunk(
-                        reasoning_content="**Generation Process Begins**\n\nInitializing generation request...\n",
+                        reasoning_content="Initializing generation request...",
+                        stage="generation",
+                        status="started",
                         is_first=True
                     )
                     is_first_chunk = False
                 else:
                     yield self._format_stream_chunk(
-                        reasoning_content="**Generation Process Begins**\n\nInitializing generation request...\n"
+                        reasoning_content="Initializing generation request...",
+                        stage="generation",
+                        status="started"
                     )
             
             if is_video:
@@ -344,7 +389,9 @@ class GenerationHandler:
                     # Storyboard mode
                     if stream:
                         yield self._format_stream_chunk(
-                            reasoning_content="Detected storyboard format. Converting to storyboard API format...\n"
+                            reasoning_content="Detected storyboard format. Converting to storyboard API format...",
+                            stage="storyboard",
+                            status="processing"
                         )
 
                     formatted_prompt = self.sora_client.format_storyboard_prompt(prompt)
@@ -362,7 +409,8 @@ class GenerationHandler:
                         prompt, token_obj.token,
                         orientation=model_config["orientation"],
                         media_id=media_id,
-                        n_frames=n_frames
+                        n_frames=n_frames,
+                        style_id=style_id
                     )
             else:
                 task_id = await self.sora_client.generate_image(
@@ -521,7 +569,11 @@ class GenerationHandler:
                                 last_status_output_time = current_time
                                 debug_logger.log_info(f"Task {task_id} progress: {progress_pct}% (status: {status})")
                                 yield self._format_stream_chunk(
-                                    reasoning_content=f"**Video Generation Progress**: {progress_pct}% ({status})\n"
+                                    reasoning_content=f"Video generation progress: {progress_pct}%",
+                                    stage="generation",
+                                    status="processing",
+                                    progress=progress_pct,
+                                    details={"task_status": status}
                                 )
                             break
 
@@ -568,10 +620,16 @@ class GenerationHandler:
                                     # Return error in stream format
                                     if stream:
                                         yield self._format_stream_chunk(
-                                            reasoning_content=f"**Content Policy Violation**\n\n{reason_str}\n"
+                                            reasoning_content=f"Content policy violation: {reason_str}",
+                                            stage="error",
+                                            status="error",
+                                            details={"error_type": "content_policy_violation", "reason": reason_str}
                                         )
                                         yield self._format_stream_chunk(
-                                            content=f"❌ 生成失败: {reason_str}",
+                                            content=self._format_result_content(
+                                                result_type="error",
+                                                error=reason_str or "Content violates guardrails"
+                                            ),
                                             finish_reason="STOP"
                                         )
                                         yield "data: [DONE]\n\n"
@@ -593,7 +651,9 @@ class GenerationHandler:
 
                                     if stream:
                                         yield self._format_stream_chunk(
-                                            reasoning_content="**Video Generation Completed**\n\nWatermark-free mode enabled. Publishing video to get watermark-free version...\n"
+                                            reasoning_content="Watermark-free mode enabled. Publishing video to get watermark-free version...",
+                                            stage="watermark_free",
+                                            status="started"
                                         )
 
                                     # Get watermark-free config to determine parse method
@@ -621,7 +681,10 @@ class GenerationHandler:
 
                                             if stream:
                                                 yield self._format_stream_chunk(
-                                                    reasoning_content=f"Video published successfully. Post ID: {post_id}\nUsing custom parse server to get watermark-free URL...\n"
+                                                    reasoning_content=f"Video published successfully. Using custom parse server to get watermark-free URL...",
+                                                    stage="watermark_free",
+                                                    status="processing",
+                                                    details={"post_id": post_id, "parse_method": "custom"}
                                                 )
 
                                             debug_logger.log_info(f"Using custom parse server: {watermark_config.custom_parse_url}")
@@ -639,7 +702,10 @@ class GenerationHandler:
 
                                         if stream:
                                             yield self._format_stream_chunk(
-                                                reasoning_content=f"Video published successfully. Post ID: {post_id}\nNow {'caching' if config.cache_enabled else 'preparing'} watermark-free video...\n"
+                                                reasoning_content=f"Video published successfully. Now {'caching' if config.cache_enabled else 'preparing'} watermark-free video...",
+                                                stage="watermark_free",
+                                                status="processing",
+                                                details={"post_id": post_id, "cache_enabled": config.cache_enabled}
                                             )
 
                                         # Cache watermark-free video (if cache enabled)
@@ -649,7 +715,9 @@ class GenerationHandler:
                                                 local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
                                                 if stream:
                                                     yield self._format_stream_chunk(
-                                                        reasoning_content="Watermark-free video cached successfully. Preparing final response...\n"
+                                                        reasoning_content="Watermark-free video cached successfully. Preparing final response...",
+                                                        stage="cache",
+                                                        status="completed"
                                                     )
 
                                                 # Delete the published post after caching
@@ -717,7 +785,11 @@ class GenerationHandler:
                                         if config.cache_enabled:
                                             if stream:
                                                 yield self._format_stream_chunk(
-                                                    reasoning_content="**Video Generation Completed**\n\nVideo generation successful. Now caching the video file...\n"
+                                                    reasoning_content="Video generation successful. Now caching the video file...",
+                                                    stage="cache",
+                                                    status="started",
+                                                    progress=100,
+                                                    details={"cache_enabled": True}
                                                 )
 
                                             try:
@@ -725,21 +797,29 @@ class GenerationHandler:
                                                 local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
                                                 if stream:
                                                     yield self._format_stream_chunk(
-                                                        reasoning_content="Video file cached successfully. Preparing final response...\n"
+                                                        reasoning_content="Video file cached successfully. Preparing final response...",
+                                                        stage="cache",
+                                                        status="completed"
                                                     )
                                             except Exception as cache_error:
                                                 # Fallback to original URL if caching fails
                                                 local_url = url
                                                 if stream:
                                                     yield self._format_stream_chunk(
-                                                        reasoning_content=f"Warning: Failed to cache file - {str(cache_error)}\nUsing original URL instead...\n"
+                                                        reasoning_content=f"Warning: Failed to cache file - {str(cache_error)}. Using original URL instead...",
+                                                        stage="cache",
+                                                        status="error",
+                                                        details={"error": str(cache_error)}
                                                     )
                                         else:
                                             # Cache disabled: use original URL directly
                                             local_url = url
                                             if stream:
                                                 yield self._format_stream_chunk(
-                                                    reasoning_content="**Video Generation Completed**\n\nCache is disabled. Using original URL directly...\n"
+                                                    reasoning_content="Video generation completed. Cache is disabled, using original URL directly...",
+                                                    stage="generation",
+                                                    status="completed",
+                                                    progress=100
                                                 )
 
                                 # Task completed
@@ -749,9 +829,12 @@ class GenerationHandler:
                                 )
 
                                 if stream:
-                                    # Final response with content
+                                    # Final response with structured content
                                     yield self._format_stream_chunk(
-                                        content=f"```html\n<video src='{local_url}' controls></video>\n```",
+                                        content=self._format_result_content(
+                                            result_type="video",
+                                            url=local_url
+                                        ),
                                         finish_reason="STOP"
                                     )
                                     yield "data: [DONE]\n\n"
@@ -777,7 +860,11 @@ class GenerationHandler:
                                     # Cache image files
                                     if stream:
                                         yield self._format_stream_chunk(
-                                            reasoning_content=f"**Image Generation Completed**\n\nImage generation successful. Now caching {len(urls)} image(s)...\n"
+                                            reasoning_content=f"Image generation successful. Now caching {len(urls)} image(s)...",
+                                            stage="cache",
+                                            status="started",
+                                            progress=100,
+                                            details={"image_count": len(urls)}
                                         )
 
                                     base_url = self._get_base_url()
@@ -792,26 +879,37 @@ class GenerationHandler:
                                                 local_urls.append(local_url)
                                                 if stream and len(urls) > 1:
                                                     yield self._format_stream_chunk(
-                                                        reasoning_content=f"Cached image {idx + 1}/{len(urls)}...\n"
+                                                        reasoning_content=f"Cached image {idx + 1}/{len(urls)}...",
+                                                        stage="cache",
+                                                        status="processing",
+                                                        details={"current": idx + 1, "total": len(urls)}
                                                     )
                                             except Exception as cache_error:
                                                 # Fallback to original URL if caching fails
                                                 local_urls.append(url)
                                                 if stream:
                                                     yield self._format_stream_chunk(
-                                                        reasoning_content=f"Warning: Failed to cache image {idx + 1} - {str(cache_error)}\nUsing original URL instead...\n"
+                                                        reasoning_content=f"Warning: Failed to cache image {idx + 1} - {str(cache_error)}. Using original URL instead...",
+                                                        stage="cache",
+                                                        status="error",
+                                                        details={"image_index": idx + 1, "error": str(cache_error)}
                                                     )
 
                                         if stream and all(u.startswith(base_url) for u in local_urls):
                                             yield self._format_stream_chunk(
-                                                reasoning_content="All images cached successfully. Preparing final response...\n"
+                                                reasoning_content="All images cached successfully. Preparing final response...",
+                                                stage="cache",
+                                                status="completed"
                                             )
                                     else:
                                         # Cache disabled: use original URLs directly
                                         local_urls = urls
                                         if stream:
                                             yield self._format_stream_chunk(
-                                                reasoning_content="Cache is disabled. Using original URLs directly...\n"
+                                                reasoning_content="Image generation completed. Cache is disabled, using original URLs directly...",
+                                                stage="generation",
+                                                status="completed",
+                                                progress=100
                                             )
 
                                     await self.db.update_task(
@@ -820,10 +918,12 @@ class GenerationHandler:
                                     )
 
                                     if stream:
-                                        # Final response with content (Markdown format)
-                                        content_markdown = "\n".join([f"![Generated Image]({url})" for url in local_urls])
+                                        # Final response with structured content
                                         yield self._format_stream_chunk(
-                                            content=content_markdown,
+                                            content=self._format_result_content(
+                                                result_type="image",
+                                                urls=local_urls
+                                            ),
                                             finish_reason="STOP"
                                         )
                                         yield "data: [DONE]\n\n"
@@ -842,7 +942,10 @@ class GenerationHandler:
 
                                     if stream:
                                         yield self._format_stream_chunk(
-                                            reasoning_content=f"**Processing**\n\nGeneration in progress: {progress:.0f}% completed...\n"
+                                            reasoning_content=f"Image generation in progress: {progress:.0f}% completed...",
+                                            stage="generation",
+                                            status="processing",
+                                            progress=progress
                                         )
 
                     # For image generation, send heartbeat every 10 seconds if no progress update
@@ -852,7 +955,10 @@ class GenerationHandler:
                             last_heartbeat_time = current_time
                             elapsed = int(current_time - start_time)
                             yield self._format_stream_chunk(
-                                reasoning_content=f"Image generation in progress... ({elapsed}s elapsed)\n"
+                                reasoning_content=f"Image generation in progress... ({elapsed}s elapsed)",
+                                stage="generation",
+                                status="processing",
+                                details={"elapsed_seconds": elapsed}
                             )
 
                     # If task not found in response, send heartbeat for image generation
@@ -862,7 +968,10 @@ class GenerationHandler:
                             last_heartbeat_time = current_time
                             elapsed = int(current_time - start_time)
                             yield self._format_stream_chunk(
-                                reasoning_content=f"Image generation in progress... ({elapsed}s elapsed)\n"
+                                reasoning_content=f"Image generation in progress... ({elapsed}s elapsed)",
+                                stage="generation",
+                                status="processing",
+                                details={"elapsed_seconds": elapsed}
                             )
 
                 # Progress update for stream mode (fallback if no status from API)
@@ -871,7 +980,11 @@ class GenerationHandler:
                     if estimated_progress > last_progress + 20:  # Update every 20%
                         last_progress = estimated_progress
                         yield self._format_stream_chunk(
-                            reasoning_content=f"**Processing**\n\nGeneration in progress: {estimated_progress:.0f}% completed (estimated)...\n"
+                            reasoning_content=f"Generation in progress: {estimated_progress:.0f}% completed (estimated)...",
+                            stage="generation",
+                            status="processing",
+                            progress=estimated_progress,
+                            details={"estimated": True}
                         )
             
             except Exception as e:
@@ -897,14 +1010,31 @@ class GenerationHandler:
         raise Exception(f"Upstream API timeout: Generation exceeded {timeout} seconds limit")
     
     def _format_stream_chunk(self, content: str = None, reasoning_content: str = None,
-                            finish_reason: str = None, is_first: bool = False) -> str:
-        """Format streaming response chunk
+                            finish_reason: str = None, is_first: bool = False,
+                            stage: str = None, status: str = None, progress: float = None,
+                            details: Dict[str, Any] = None) -> str:
+        """Format streaming response chunk with structured reasoning_content
 
         Args:
             content: Final response content (for user-facing output)
-            reasoning_content: Thinking/reasoning process content
+            reasoning_content: Thinking/reasoning process content (legacy text format, will be converted to structured)
             finish_reason: Finish reason (e.g., "STOP")
             is_first: Whether this is the first chunk (includes role)
+            stage: Current processing stage (e.g., "upload", "generation", "cache", "character_creation")
+            status: Current status (e.g., "started", "processing", "completed", "error")
+            progress: Progress percentage (0-100)
+            details: Additional details as a dictionary
+
+        Returns:
+            Formatted SSE data string with structured reasoning_content:
+            {
+                "stage": "generation",
+                "status": "processing",
+                "progress": 50,
+                "message": "Video generation in progress...",
+                "details": {...},
+                "timestamp": 1234567890
+            }
         """
         chunk_id = f"chatcmpl-{int(datetime.now().timestamp() * 1000)}"
 
@@ -920,8 +1050,19 @@ class GenerationHandler:
         else:
             delta["content"] = None
 
-        if reasoning_content is not None:
-            delta["reasoning_content"] = reasoning_content
+        # Build structured reasoning_content
+        if reasoning_content is not None or stage is not None:
+            structured_reasoning = {
+                "stage": stage or self._infer_stage_from_message(reasoning_content),
+                "status": status or self._infer_status_from_message(reasoning_content),
+                "progress": progress,
+                "message": reasoning_content.strip() if reasoning_content else None,
+                "details": details,
+                "timestamp": int(datetime.now().timestamp())
+            }
+            # Remove None values for cleaner output
+            structured_reasoning = {k: v for k, v in structured_reasoning.items() if v is not None}
+            delta["reasoning_content"] = structured_reasoning
         else:
             delta["reasoning_content"] = None
 
@@ -948,7 +1089,101 @@ class GenerationHandler:
             response["usage"]["completion_tokens"] = 1
             response["usage"]["total_tokens"] = 1
 
-        return f'data: {json.dumps(response)}\n\n'
+        return f'data: {json.dumps(response, ensure_ascii=False)}\n\n'
+
+    def _format_result_content(self, result_type: str, urls: list = None, url: str = None,
+                                username: str = None, display_name: str = None,
+                                cameo_id: str = None, character_id: str = None,
+                                error: str = None) -> str:
+        """Format structured result content as JSON string
+
+        Args:
+            result_type: Type of result ("image", "video", "character", "error")
+            urls: List of URLs (for images)
+            url: Single URL (for video)
+            username: Character username
+            display_name: Character display name
+            cameo_id: Character cameo ID
+            character_id: Character ID
+            error: Error message
+
+        Returns:
+            JSON string with structured result data
+        """
+        result = {"type": result_type}
+
+        if result_type == "image":
+            result["urls"] = urls or []
+            result["count"] = len(urls) if urls else 0
+            # OpenAI Images API compatible format
+            result["data"] = [{"url": u} for u in (urls or [])]
+
+        elif result_type == "video":
+            result["url"] = url
+            # OpenAI Sora API compatible format
+            result["data"] = [{
+                "url": url,
+                "revised_prompt": None
+            }]
+
+        elif result_type == "character":
+            result["username"] = username
+            result["display_name"] = display_name
+            result["cameo_id"] = cameo_id
+            result["character_id"] = character_id
+            # Structured data format
+            result["data"] = {
+                "username": username,
+                "display_name": display_name,
+                "cameo_id": cameo_id,
+                "character_id": character_id
+            }
+
+        elif result_type == "error":
+            result["error"] = error
+            result["data"] = {"error": error}
+
+        return json.dumps(result, ensure_ascii=False)
+
+    def _infer_stage_from_message(self, message: str) -> str:
+        """Infer stage from reasoning message content"""
+        if not message:
+            return "unknown"
+        message_lower = message.lower()
+        if "upload" in message_lower:
+            return "upload"
+        elif "generation" in message_lower or "generating" in message_lower:
+            return "generation"
+        elif "cache" in message_lower or "caching" in message_lower:
+            return "cache"
+        elif "character" in message_lower or "cameo" in message_lower:
+            return "character_creation"
+        elif "remix" in message_lower:
+            return "remix"
+        elif "watermark" in message_lower or "publish" in message_lower:
+            return "watermark_free"
+        elif "progress" in message_lower:
+            return "progress"
+        elif "storyboard" in message_lower:
+            return "storyboard"
+        elif "policy" in message_lower or "violation" in message_lower:
+            return "error"
+        return "processing"
+
+    def _infer_status_from_message(self, message: str) -> str:
+        """Infer status from reasoning message content"""
+        if not message:
+            return "processing"
+        message_lower = message.lower()
+        if "begins" in message_lower or "initializing" in message_lower or "starting" in message_lower:
+            return "started"
+        elif "completed" in message_lower or "success" in message_lower or "finished" in message_lower:
+            return "completed"
+        elif "failed" in message_lower or "error" in message_lower or "warning" in message_lower or "violation" in message_lower:
+            return "error"
+        elif "progress" in message_lower or "processing" in message_lower or "in progress" in message_lower:
+            return "processing"
+        return "processing"
     
     def _format_non_stream_response(self, content: str, media_type: str = None, is_availability_check: bool = False) -> str:
         """Format non-streaming response
@@ -1001,18 +1236,24 @@ class GenerationHandler:
 
     # ==================== Character Creation and Remix Handlers ====================
 
-    async def _handle_character_creation_only(self, video_data, model_config: Dict) -> AsyncGenerator[str, None]:
+    async def _handle_character_creation_only(self, video_data, model_config: Dict,
+                                               character_options: Optional[CharacterOptions] = None) -> AsyncGenerator[str, None]:
         """Handle character creation only (no video generation)
 
         Flow:
         1. Download video if URL, or use bytes directly
-        2. Upload video to create character
+        2. Upload video to create character (with optional custom timestamps)
         3. Poll for character processing
         4. Download and cache avatar
         5. Upload avatar
-        6. Finalize character
+        6. Finalize character (with optional custom username, display_name, instruction_set, safety_instruction_set)
         7. Set character as public
         8. Return success message
+
+        Args:
+            video_data: Video bytes or URL
+            model_config: Model configuration
+            character_options: Optional custom character creation options
         """
         token_obj = await self.load_balancer.select_token(for_video_generation=True)
         if not token_obj:
@@ -1034,11 +1275,16 @@ class GenerationHandler:
             else:
                 video_bytes = video_data
 
+            # Get custom timestamps from character_options
+            custom_timestamps = character_options.timestamps if character_options else None
+
             # Step 1: Upload video
             yield self._format_stream_chunk(
                 reasoning_content="Uploading video file...\n"
             )
-            cameo_id = await self.sora_client.upload_character_video(video_bytes, token_obj.token)
+            cameo_id = await self.sora_client.upload_character_video(
+                video_bytes, token_obj.token, timestamps=custom_timestamps
+            )
             debug_logger.log_info(f"Video uploaded, cameo_id: {cameo_id}")
 
             # Step 2: Poll for character processing
@@ -1048,19 +1294,33 @@ class GenerationHandler:
             cameo_status = await self._poll_cameo_status(cameo_id, token_obj.token)
             debug_logger.log_info(f"Cameo status: {cameo_status}")
 
-            # Extract character info immediately after polling completes
-            username_hint = cameo_status.get("username_hint", "character")
-            display_name = cameo_status.get("display_name_hint", "Character")
+            # Extract character info - use custom values if provided, otherwise use API hints
+            if character_options and character_options.username:
+                username = character_options.username
+                debug_logger.log_info(f"Using custom username: {username}")
+            else:
+                username_hint = cameo_status.get("username_hint", "character")
+                # Process username: remove prefix and add 3 random digits
+                username = self._process_character_username(username_hint)
 
-            # Process username: remove prefix and add 3 random digits
-            username = self._process_character_username(username_hint)
+            if character_options and character_options.display_name:
+                display_name = character_options.display_name
+                debug_logger.log_info(f"Using custom display_name: {display_name}")
+            else:
+                display_name = cameo_status.get("display_name_hint", "Character")
 
-            # Output character name immediately
+            # Step 3: Check username availability and ensure it's available
             yield self._format_stream_chunk(
-                reasoning_content=f"✨ 角色已识别: {display_name} (@{username})\n"
+                reasoning_content="Checking username availability...\n"
+            )
+            username = await self._ensure_username_available(username, token_obj.token)
+
+            # Output character name
+            yield self._format_stream_chunk(
+                reasoning_content=f"{display_name} (@{username})\n"
             )
 
-            # Step 3: Download and cache avatar
+            # Step 4: Download and cache avatar
             yield self._format_stream_chunk(
                 reasoning_content="Downloading character avatar...\n"
             )
@@ -1071,19 +1331,30 @@ class GenerationHandler:
             avatar_data = await self.sora_client.download_character_image(profile_asset_url)
             debug_logger.log_info(f"Avatar downloaded, size: {len(avatar_data)} bytes")
 
-            # Step 4: Upload avatar
+            # Step 5: Upload avatar
             yield self._format_stream_chunk(
                 reasoning_content="Uploading character avatar...\n"
             )
             asset_pointer = await self.sora_client.upload_character_image(avatar_data, token_obj.token)
             debug_logger.log_info(f"Avatar uploaded, asset_pointer: {asset_pointer}")
 
-            # Step 5: Finalize character
+            # Step 6: Finalize character - use custom instruction_set and safety_instruction_set if provided
             yield self._format_stream_chunk(
                 reasoning_content="Finalizing character creation...\n"
             )
-            # instruction_set_hint is a string, but instruction_set in cameo_status might be an array
-            instruction_set = cameo_status.get("instruction_set_hint") or cameo_status.get("instruction_set")
+
+            # Determine instruction_set: custom > API hint > None
+            if character_options and character_options.instruction_set:
+                instruction_set = character_options.instruction_set
+                debug_logger.log_info(f"Using custom instruction_set")
+            else:
+                instruction_set = cameo_status.get("instruction_set_hint") or cameo_status.get("instruction_set")
+
+            # Determine safety_instruction_set: custom > None
+            safety_instruction_set = None
+            if character_options and character_options.safety_instruction_set:
+                safety_instruction_set = character_options.safety_instruction_set
+                debug_logger.log_info(f"Using custom safety_instruction_set")
 
             character_id = await self.sora_client.finalize_character(
                 cameo_id=cameo_id,
@@ -1091,20 +1362,43 @@ class GenerationHandler:
                 display_name=display_name,
                 profile_asset_pointer=asset_pointer,
                 instruction_set=instruction_set,
+                safety_instruction_set=safety_instruction_set,
                 token=token_obj.token
             )
             debug_logger.log_info(f"Character finalized, character_id: {character_id}")
 
-            # Step 6: Set character as public
+            # Step 7: Set character as public
             yield self._format_stream_chunk(
                 reasoning_content="Setting character as public...\n"
             )
             await self.sora_client.set_character_public(cameo_id, token_obj.token)
             debug_logger.log_info(f"Character set as public")
 
-            # Step 7: Return success message
+            # Step 8: Save character to database
+            character_record = Character(
+                cameo_id=cameo_id,
+                character_id=character_id,
+                token_id=token_obj.id,
+                username=username,
+                display_name=display_name,
+                profile_url=profile_asset_url,
+                instruction_set=json.dumps(instruction_set) if instruction_set else None,
+                safety_instruction_set=json.dumps(safety_instruction_set) if safety_instruction_set else None,
+                visibility="public",
+                status="finalized"
+            )
+            await self.db.create_character(character_record)
+            debug_logger.log_info(f"Character saved to database: cameo_id={cameo_id}")
+
+            # Step 9: Return success message - structured format
             yield self._format_stream_chunk(
-                content=f"角色创建成功，角色名@{username}",
+                content=self._format_result_content(
+                    result_type="character",
+                    username=username,
+                    display_name=display_name,
+                    cameo_id=cameo_id,
+                    character_id=character_id
+                ),
                 finish_reason="STOP"
             )
             yield "data: [DONE]\n\n"
@@ -1117,19 +1411,26 @@ class GenerationHandler:
             )
             raise
 
-    async def _handle_character_and_video_generation(self, video_data, prompt: str, model_config: Dict) -> AsyncGenerator[str, None]:
+    async def _handle_character_and_video_generation(self, video_data, prompt: str, model_config: Dict,
+                                                      character_options: Optional[CharacterOptions] = None) -> AsyncGenerator[str, None]:
         """Handle character creation and video generation
 
         Flow:
         1. Download video if URL, or use bytes directly
-        2. Upload video to create character
+        2. Upload video to create character (with optional custom timestamps)
         3. Poll for character processing
         4. Download and cache avatar
         5. Upload avatar
-        6. Finalize character
+        6. Finalize character (with optional custom username, display_name, instruction_set, safety_instruction_set)
         7. Generate video with character (@username + prompt)
         8. Delete character
         9. Return video result
+
+        Args:
+            video_data: Video bytes or URL
+            prompt: Generation prompt
+            model_config: Model configuration
+            character_options: Optional custom character creation options
         """
         token_obj = await self.load_balancer.select_token(for_video_generation=True)
         if not token_obj:
@@ -1152,11 +1453,16 @@ class GenerationHandler:
             else:
                 video_bytes = video_data
 
+            # Get custom timestamps from character_options
+            custom_timestamps = character_options.timestamps if character_options else None
+
             # Step 1: Upload video
             yield self._format_stream_chunk(
                 reasoning_content="Uploading video file...\n"
             )
-            cameo_id = await self.sora_client.upload_character_video(video_bytes, token_obj.token)
+            cameo_id = await self.sora_client.upload_character_video(
+                video_bytes, token_obj.token, timestamps=custom_timestamps
+            )
             debug_logger.log_info(f"Video uploaded, cameo_id: {cameo_id}")
 
             # Step 2: Poll for character processing
@@ -1166,19 +1472,33 @@ class GenerationHandler:
             cameo_status = await self._poll_cameo_status(cameo_id, token_obj.token)
             debug_logger.log_info(f"Cameo status: {cameo_status}")
 
-            # Extract character info immediately after polling completes
-            username_hint = cameo_status.get("username_hint", "character")
-            display_name = cameo_status.get("display_name_hint", "Character")
+            # Extract character info - use custom values if provided, otherwise use API hints
+            if character_options and character_options.username:
+                username = character_options.username
+                debug_logger.log_info(f"Using custom username: {username}")
+            else:
+                username_hint = cameo_status.get("username_hint", "character")
+                # Process username: remove prefix and add 3 random digits
+                username = self._process_character_username(username_hint)
 
-            # Process username: remove prefix and add 3 random digits
-            username = self._process_character_username(username_hint)
+            if character_options and character_options.display_name:
+                display_name = character_options.display_name
+                debug_logger.log_info(f"Using custom display_name: {display_name}")
+            else:
+                display_name = cameo_status.get("display_name_hint", "Character")
 
-            # Output character name immediately
+            # Step 3: Check username availability and ensure it's available
             yield self._format_stream_chunk(
-                reasoning_content=f"✨ 角色已识别: {display_name} (@{username})\n"
+                reasoning_content="Checking username availability...\n"
+            )
+            username = await self._ensure_username_available(username, token_obj.token)
+
+            # Output character name
+            yield self._format_stream_chunk(
+                reasoning_content=f"{display_name} (@{username})\n"
             )
 
-            # Step 3: Download and cache avatar
+            # Step 4: Download and cache avatar
             yield self._format_stream_chunk(
                 reasoning_content="Downloading character avatar...\n"
             )
@@ -1189,19 +1509,30 @@ class GenerationHandler:
             avatar_data = await self.sora_client.download_character_image(profile_asset_url)
             debug_logger.log_info(f"Avatar downloaded, size: {len(avatar_data)} bytes")
 
-            # Step 4: Upload avatar
+            # Step 5: Upload avatar
             yield self._format_stream_chunk(
                 reasoning_content="Uploading character avatar...\n"
             )
             asset_pointer = await self.sora_client.upload_character_image(avatar_data, token_obj.token)
             debug_logger.log_info(f"Avatar uploaded, asset_pointer: {asset_pointer}")
 
-            # Step 5: Finalize character
+            # Step 6: Finalize character - use custom instruction_set and safety_instruction_set if provided
             yield self._format_stream_chunk(
                 reasoning_content="Finalizing character creation...\n"
             )
-            # instruction_set_hint is a string, but instruction_set in cameo_status might be an array
-            instruction_set = cameo_status.get("instruction_set_hint") or cameo_status.get("instruction_set")
+
+            # Determine instruction_set: custom > API hint > None
+            if character_options and character_options.instruction_set:
+                instruction_set = character_options.instruction_set
+                debug_logger.log_info(f"Using custom instruction_set")
+            else:
+                instruction_set = cameo_status.get("instruction_set_hint") or cameo_status.get("instruction_set")
+
+            # Determine safety_instruction_set: custom > None
+            safety_instruction_set = None
+            if character_options and character_options.safety_instruction_set:
+                safety_instruction_set = character_options.safety_instruction_set
+                debug_logger.log_info(f"Using custom safety_instruction_set")
 
             character_id = await self.sora_client.finalize_character(
                 cameo_id=cameo_id,
@@ -1209,11 +1540,28 @@ class GenerationHandler:
                 display_name=display_name,
                 profile_asset_pointer=asset_pointer,
                 instruction_set=instruction_set,
+                safety_instruction_set=safety_instruction_set,
                 token=token_obj.token
             )
             debug_logger.log_info(f"Character finalized, character_id: {character_id}")
 
-            # Step 6: Generate video with character
+            # Save character to database (even for video generation, we track the character)
+            character_record = Character(
+                cameo_id=cameo_id,
+                character_id=character_id,
+                token_id=token_obj.id,
+                username=username,
+                display_name=display_name,
+                profile_url=profile_asset_url,
+                instruction_set=json.dumps(instruction_set) if instruction_set else None,
+                safety_instruction_set=json.dumps(safety_instruction_set) if safety_instruction_set else None,
+                visibility="private",  # Will be deleted after video generation
+                status="finalized"
+            )
+            await self.db.create_character(character_record)
+            debug_logger.log_info(f"Character saved to database: cameo_id={cameo_id}")
+
+            # Step 7: Generate video with character
             yield self._format_stream_chunk(
                 reasoning_content="**Video Generation Process Begins**\n\nGenerating video with character...\n"
             )

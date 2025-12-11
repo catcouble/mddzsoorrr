@@ -66,6 +66,22 @@ class Task(BaseModel):
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
+class Character(BaseModel):
+    """Character (角色卡) model"""
+    id: Optional[int] = None
+    cameo_id: str  # Sora cameo ID (e.g., 693afd1c8848819183981970eea64a31)
+    character_id: Optional[str] = None  # Sora character ID
+    token_id: int  # Associated token ID
+    username: str  # Character username
+    display_name: str  # Character display name
+    profile_url: Optional[str] = None  # Profile image URL
+    instruction_set: Optional[str] = None  # JSON string of instruction_set
+    safety_instruction_set: Optional[str] = None  # JSON string of safety_instruction_set
+    visibility: str = "private"  # private/public
+    status: str = "finalized"  # processing/finalized/deleted
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
 class RequestLog(BaseModel):
     """Request log model"""
     id: Optional[int] = None
@@ -132,6 +148,14 @@ class ChatMessage(BaseModel):
     role: str
     content: Union[str, List[dict]]  # Support both string and array format (OpenAI multimodal)
 
+class CharacterOptions(BaseModel):
+    """Character creation options"""
+    timestamps: Optional[str] = None  # e.g., "0,3" - video timestamps for character extraction
+    username: Optional[str] = None  # Custom username for character
+    display_name: Optional[str] = None  # Custom display name for character
+    instruction_set: Optional[str] = None  # Character instruction set
+    safety_instruction_set: Optional[str] = None  # Safety instruction set
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
@@ -140,6 +164,10 @@ class ChatCompletionRequest(BaseModel):
     remix_target_id: Optional[str] = None  # Sora share link video ID for remix
     stream: bool = False
     max_tokens: Optional[int] = None
+    # Character creation options
+    character_options: Optional[CharacterOptions] = None
+    # Video style (festive, retro, news, selfie, handheld, anime)
+    style_id: Optional[str] = None
 
 class ChatCompletionChoice(BaseModel):
     index: int
