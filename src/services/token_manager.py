@@ -698,6 +698,9 @@ class TokenManager:
             email = jwt_email or ""
             name = email.split("@")[0] if email else ""
 
+        # Add delay to avoid 429 rate limit
+        await asyncio.sleep(0.5)
+
         # Get subscription info from Sora API
         plan_type = None
         plan_title = None
@@ -718,6 +721,9 @@ class TokenManager:
             # If API call fails, subscription info will be None
             print(f"Failed to get subscription info: {e}")
 
+        # Add delay to avoid 429 rate limit
+        await asyncio.sleep(0.5)
+
         # Get Sora2 invite code
         sora2_supported = None
         sora2_invite_code = None
@@ -733,6 +739,8 @@ class TokenManager:
 
             # If Sora2 is supported, get remaining count
             if sora2_supported:
+                # Add delay to avoid 429 rate limit
+                await asyncio.sleep(0.5)
                 try:
                     remaining_info = await self.get_sora2_remaining_count(token_value)
                     if remaining_info.get("success"):
@@ -747,6 +755,9 @@ class TokenManager:
                 raise
             # If API call fails, Sora2 info will be None
             print(f"Failed to get Sora2 info: {e}")
+
+        # Add delay to avoid 429 rate limit
+        await asyncio.sleep(0.5)
 
         # Check and set username if needed
         try:
@@ -766,6 +777,8 @@ class TokenManager:
 
                     # Check if username is available
                     if await self.check_username_available(token_value, generated_username):
+                        # Add delay to avoid 429 rate limit
+                        await asyncio.sleep(0.5)
                         # Set the username
                         try:
                             await self.set_username(token_value, generated_username)
@@ -779,6 +792,8 @@ class TokenManager:
                         print(f"⚠️  用户名 {generated_username} 已被占用，尝试下一个")
                         if attempt == max_attempts - 1:
                             print(f"⚠️  达到最大尝试次数，跳过用户名设置")
+                    # Add delay between attempts to avoid 429 rate limit
+                    await asyncio.sleep(0.3)
             else:
                 print(f"✅ 用户名已设置: {username}")
         except Exception as e:
