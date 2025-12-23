@@ -20,6 +20,7 @@ from .api import routes as api_routes
 from .api import admin as admin_routes
 from .api import public as public_routes
 from .api import openai_compat as openai_routes
+from .api import sora_compat as sora_routes
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -52,12 +53,14 @@ api_routes.set_generation_handler(generation_handler)
 admin_routes.set_dependencies(token_manager, proxy_manager, db, generation_handler, concurrency_manager, webdav_manager)
 public_routes.set_dependencies(token_manager, db, generation_handler, webdav_manager)
 openai_routes.set_generation_handler(generation_handler)
+sora_routes.set_generation_handler(generation_handler)
 
 # Include routers
 app.include_router(api_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(public_routes.router)
 app.include_router(openai_routes.router)
+app.include_router(sora_routes.router)
 
 # Static files
 static_dir = Path(__file__).parent.parent / "static"
