@@ -116,4 +116,14 @@ class ProxyManager:
         async with self._pool_lock:
             self._proxy_pool = self._load_proxy_pool()
             self._pool_index = 0
+            if self._proxy_pool:
+                print(f"✅ Proxy pool reloaded: {len(self._proxy_pool)} proxies")
+                # Print first proxy as example (masked for security)
+                first_proxy = self._proxy_pool[0]
+                if "@" in first_proxy:
+                    # Mask credentials
+                    parts = first_proxy.split("@")
+                    print(f"   Example format: {parts[0][:15]}...@{parts[1]}")
+                else:
+                    print(f"   Example format: {first_proxy}")
         return len(self._proxy_pool)
