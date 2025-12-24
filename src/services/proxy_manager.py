@@ -24,10 +24,48 @@ class ProxyManager:
                     for line in f:
                         line = line.strip()
                         if line and not line.startswith("#"):
-                            proxies.append(line)
+                            # Convert to standard proxy URL format
+                            proxy_url = self._parse_proxy_line(line)
+                            if proxy_url:
+                                proxies.append(proxy_url)
             except Exception as e:
                 print(f"⚠️ Failed to load proxy pool: {e}")
         return proxies
+    
+    def _parse_proxy_line(self, line: str) -> Optional[str]:
+        """Parse proxy line and convert to standard URL format
+        
+        Supported formats:
+        - http://host:port
+        - http://user:pass@host:port
+        - socks5://host:port
+        - socks5://user:pass@host:port
+        - host:port (assumes http)
+        - host:port:user:pass (IP:端口:用户名:密码 format)
+        """
+        line = line.strip()
+        if not line:
+            return None
+        
+        # Already a URL format
+        if line.startswith("http://") or line.startswith("https://") or line.startswith("socks5://"):
+            return line
+        
+        parts = line.split(":")
+        
+        # Format: host:port
+        if len(parts) == 2:
+            host, port = parts
+            return f"http://{host}:{port}"
+        
+        # Format: host:port:user:pass (IP:端口:用户名:密码)
+        if len(parts) == 4:
+            host, port, user, password = parts
+            return f"http://{user}:{password}@{host}:{port}"
+        
+        # Unknown format, return as-is and let it fail later if invalid
+        print(f"⚠️ Unknown proxy format: {line}")
+        return line
     
     async def get_proxy_url(self) -> Optional[str]:
         """Get proxy URL if enabled, with pool rotation support"""
