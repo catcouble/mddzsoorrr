@@ -606,12 +606,14 @@ async def update_watermark_free_config(
 @router.get("/api/cloudflare/config")
 async def get_cloudflare_solver_config(token: str = Depends(verify_admin_token)) -> dict:
     """Get Cloudflare Solver configuration"""
-    from ..core.config import config
+    # Ensure table has a row
+    await db.ensure_cloudflare_solver_config_row()
+    config_obj = await db.get_cloudflare_solver_config()
     return {
         "success": True,
         "config": {
-            "solver_enabled": config.cloudflare_solver_enabled,
-            "solver_api_url": config.cloudflare_solver_api_url
+            "solver_enabled": config_obj.solver_enabled,
+            "solver_api_url": config_obj.solver_api_url
         }
     }
 
@@ -623,6 +625,17 @@ async def update_cloudflare_solver_config(
     """Update Cloudflare Solver configuration"""
     try:
         from ..core.config import config
+        
+        # Ensure table has a row
+        await db.ensure_cloudflare_solver_config_row()
+        
+        # Update database
+        await db.update_cloudflare_solver_config(
+            request.solver_enabled,
+            request.solver_api_url
+        )
+        
+        # Also update in-memory config for immediate effect
         config.set_cloudflare_solver_enabled(request.solver_enabled)
         if request.solver_api_url:
             config.set_cloudflare_solver_api_url(request.solver_api_url)

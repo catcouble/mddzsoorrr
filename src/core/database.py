@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Optional, List
 from pathlib import Path
-from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, WatermarkFreeConfig, CacheConfig, GenerationConfig, TokenRefreshConfig, Character, WebDAVConfig, VideoRecord, UploadLog
+from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, WatermarkFreeConfig, CacheConfig, GenerationConfig, TokenRefreshConfig, CloudflareSolverConfig, Character, WebDAVConfig, VideoRecord, UploadLog
 
 class Database:
     """SQLite database manager"""
@@ -170,6 +170,25 @@ class Database:
                 VALUES (1, ?)
             """, (at_auto_refresh_enabled,))
 
+        # Ensure cloudflare_solver_config has a row
+        if await self._table_exists(db, "cloudflare_solver_config"):
+            cursor = await db.execute("SELECT COUNT(*) FROM cloudflare_solver_config")
+            count = await cursor.fetchone()
+            if count[0] == 0:
+                # Get cloudflare solver config from config_dict if provided, otherwise use defaults
+                solver_enabled = False
+                solver_api_url = "http://localhost:8000/v1/challenge"
+
+                if config_dict:
+                    cloudflare_config = config_dict.get("cloudflare", {})
+                    solver_enabled = cloudflare_config.get("solver_enabled", False)
+                    solver_api_url = cloudflare_config.get("solver_api_url", "http://localhost:8000/v1/challenge")
+
+                await db.execute("""
+                    INSERT INTO cloudflare_solver_config (id, solver_enabled, solver_api_url)
+                    VALUES (1, ?, ?)
+                """, (solver_enabled, solver_api_url))
+
 
     async def check_and_migrate_db(self, config_dict: dict = None):
         """Check database integrity and perform migrations if needed
@@ -269,6 +288,27 @@ class Database:
             await self._ensure_config_rows(db, config_dict)
 
             # Create new tables if they don't exist (for migration)
+            if not await self._table_exists(db, "cloudflare_solver_config"):
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS cloudflare_solver_config (
+                        id INTEGER PRIMARY KEY DEFAULT 1,
+                        solver_enabled BOOLEAN DEFAULT 0,
+                        solver_api_url TEXT DEFAULT 'http://localhost:8000/v1/challenge',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                print("  ✓ Created cloudflare_solver_config table")
+                # Initialize with values from setting.toml
+                if config_dict:
+                    cloudflare_config = config_dict.get("cloudflare", {})
+                    solver_enabled = cloudflare_config.get("solver_enabled", False)
+                    solver_api_url = cloudflare_config.get("solver_api_url", "http://localhost:8000/v1/challenge")
+                    await db.execute("""
+                        INSERT INTO cloudflare_solver_config (id, solver_enabled, solver_api_url)
+                        VALUES (1, ?, ?)
+                    """, (solver_enabled, solver_api_url))
+
             if not await self._table_exists(db, "webdav_config"):
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS webdav_config (
@@ -479,6 +519,17 @@ class Database:
                 CREATE TABLE IF NOT EXISTS token_refresh_config (
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     at_auto_refresh_enabled BOOLEAN DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Cloudflare Solver config table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS cloudflare_solver_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    solver_enabled BOOLEAN DEFAULT 0,
+                    solver_api_url TEXT DEFAULT 'http://localhost:8000/v1/challenge',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -1281,6 +1332,53 @@ class Database:
                 WHERE id = 1
             """, (at_auto_refresh_enabled,))
             await db.commit()
+
+    # Cloudflare Solver config operations
+    async def get_cloudflare_solver_config(self) -> CloudflareSolverConfig:
+        """Get Cloudflare Solver configuration"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM cloudflare_solver_config WHERE id = 1")
+            row = await cursor.fetchone()
+            if row:
+                return CloudflareSolverConfig(**dict(row))
+            # If no row exists, return a default config
+            return CloudflareSolverConfig(solver_enabled=False, solver_api_url="http://localhost:8000/v1/challenge")
+
+    async def update_cloudflare_solver_config(self, solver_enabled: bool, solver_api_url: str = None):
+        """Update Cloudflare Solver configuration"""
+        async with aiosqlite.connect(self.db_path) as db:
+            if solver_api_url is not None:
+                await db.execute("""
+                    UPDATE cloudflare_solver_config
+                    SET solver_enabled = ?, solver_api_url = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (solver_enabled, solver_api_url))
+            else:
+                await db.execute("""
+                    UPDATE cloudflare_solver_config
+                    SET solver_enabled = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (solver_enabled,))
+            await db.commit()
+
+    async def ensure_cloudflare_solver_config_row(self, config_dict: dict = None):
+        """Ensure cloudflare_solver_config table has a row"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM cloudflare_solver_config")
+            count = await cursor.fetchone()
+            if count[0] == 0:
+                solver_enabled = False
+                solver_api_url = "http://localhost:8000/v1/challenge"
+                if config_dict:
+                    cloudflare_config = config_dict.get("cloudflare", {})
+                    solver_enabled = cloudflare_config.get("solver_enabled", False)
+                    solver_api_url = cloudflare_config.get("solver_api_url", solver_api_url)
+                await db.execute("""
+                    INSERT INTO cloudflare_solver_config (id, solver_enabled, solver_api_url)
+                    VALUES (1, ?, ?)
+                """, (solver_enabled, solver_api_url))
+                await db.commit()
 
     # Character (角色卡) operations
     async def create_character(self, character: Character) -> int:

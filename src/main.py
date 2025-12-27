@@ -140,6 +140,12 @@ async def startup_event():
     token_refresh_config = await db.get_token_refresh_config()
     config.set_at_auto_refresh_enabled(token_refresh_config.at_auto_refresh_enabled)
 
+    # Load Cloudflare Solver configuration from database
+    await db.ensure_cloudflare_solver_config_row(config_dict)
+    cloudflare_config = await db.get_cloudflare_solver_config()
+    config.set_cloudflare_solver_enabled(cloudflare_config.solver_enabled)
+    config.set_cloudflare_solver_api_url(cloudflare_config.solver_api_url)
+
     # Ensure WebDAV config row exists
     await db.ensure_webdav_config_row()
 

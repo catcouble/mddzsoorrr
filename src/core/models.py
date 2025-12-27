@@ -144,6 +144,14 @@ class TokenRefreshConfig(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+class CloudflareSolverConfig(BaseModel):
+    """Cloudflare Solver configuration"""
+    id: int = 1
+    solver_enabled: bool = False  # Read from database, initialized from setting.toml on first startup
+    solver_api_url: str = "http://localhost:8000/v1/challenge"  # Solver API URL
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
 class WebDAVConfig(BaseModel):
     """WebDAV configuration"""
     id: int = 1
