@@ -658,24 +658,32 @@ async def get_cloudflare_state(token: str = Depends(verify_admin_token)) -> dict
 @router.post("/api/cloudflare/refresh")
 async def refresh_cloudflare_credentials(token: str = Depends(verify_admin_token)) -> dict:
     """Manually refresh Cloudflare credentials"""
+    print("🔄 [API] 收到获取凭据请求")
+    
     from ..services.cloudflare_solver import solve_cloudflare_challenge, get_cloudflare_state
     from ..core.config import config
     
+    print(f"🔄 [API] Solver启用: {config.cloudflare_solver_enabled}, URL: {config.cloudflare_solver_api_url}")
+    
     # 检查是否启用了 Cloudflare Solver
     if not config.cloudflare_solver_enabled:
+        print("⚠️ [API] Solver未启用")
         return {
             "success": False,
             "message": "Cloudflare Solver 未启用，请先在配置中启用"
         }
     
     if not config.cloudflare_solver_api_url:
+        print("⚠️ [API] Solver URL未配置")
         return {
             "success": False,
             "message": "Cloudflare Solver API 地址未配置"
         }
     
     try:
+        print("🔄 [API] 开始调用 solve_cloudflare_challenge")
         result = await solve_cloudflare_challenge()
+        print(f"🔄 [API] solve_cloudflare_challenge 返回: {result is not None}")
         if result:
             cf_state = get_cloudflare_state()
             return {
@@ -689,6 +697,7 @@ async def refresh_cloudflare_credentials(token: str = Depends(verify_admin_token
                 "message": "获取凭据失败，请检查 Solver 服务是否正常运行，或 API 地址是否正确"
             }
     except Exception as e:
+        print(f"❌ [API] 异常: {type(e).__name__}: {e}")
         return {
             "success": False,
             "message": f"获取凭据失败: {str(e)}"
