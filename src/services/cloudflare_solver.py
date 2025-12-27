@@ -188,7 +188,7 @@ async def solve_cloudflare_challenge(
         包含 cookies 和 user_agent 的字典，如 {"cookies": {...}, "user_agent": "..."}
         失败返回 None
     """
-    import httpx
+    from curl_cffi.requests import Session
     
     if not config.cloudflare_solver_enabled or not config.cloudflare_solver_api_url:
         print("⚠️ Cloudflare Solver API 未配置")
@@ -196,41 +196,47 @@ async def solve_cloudflare_challenge(
     
     api_url = config.cloudflare_solver_api_url
     
+    def _sync_request():
+        """同步请求函数，在线程池中执行"""
+        try:
+            # 使用 curl_cffi 的同步 Session，设置超时
+            sess = Session(impersonate="chrome110", timeout=30)
+            response = sess.get(api_url)
+            return response
+        except Exception as e:
+            print(f"⚠️ Cloudflare Solver API 请求异常: {e}")
+            return None
+    
     for attempt in range(1, max_retries + 1):
         try:
             print(f"🔄 调用 Cloudflare Solver API: {api_url} (尝试 {attempt}/{max_retries})")
             
-            # 使用更细粒度的超时设置：连接超时10秒，读取超时120秒
-            timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.get(api_url)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("success"):
-                        cookies = data.get("cookies", {})
-                        user_agent = data.get("user_agent")
-                        elapsed = data.get("elapsed_seconds", 0)
-                        print(f"✅ Cloudflare Solver API 返回成功，耗时 {elapsed:.2f}s")
-                        
-                        # 更新全局状态
-                        if cookies and user_agent:
-                            _cf_state.update(cookies, user_agent)
-                        
-                        return {"cookies": cookies, "user_agent": user_agent}
-                    else:
-                        print(f"⚠️ Cloudflare Solver API 返回失败: {data.get('error')}")
+            # 使用 asyncio.to_thread 在线程池中执行同步请求，避免阻塞事件循环
+            response = await asyncio.to_thread(_sync_request)
+            
+            if response is None:
+                print(f"⚠️ Cloudflare Solver API 请求失败")
+                # 连接失败时不重试，直接返回
+                return None
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success"):
+                    cookies = data.get("cookies", {})
+                    user_agent = data.get("user_agent")
+                    elapsed = data.get("elapsed_seconds", 0)
+                    print(f"✅ Cloudflare Solver API 返回成功，耗时 {elapsed:.2f}s")
+                    
+                    # 更新全局状态
+                    if cookies and user_agent:
+                        _cf_state.update(cookies, user_agent)
+                    
+                    return {"cookies": cookies, "user_agent": user_agent}
                 else:
-                    print(f"⚠️ Cloudflare Solver API 请求失败: {response.status_code}")
+                    print(f"⚠️ Cloudflare Solver API 返回失败: {data.get('error')}")
+            else:
+                print(f"⚠️ Cloudflare Solver API 请求失败: {response.status_code}")
         
-        except httpx.ConnectError as e:
-            print(f"⚠️ Cloudflare Solver API 连接失败: {e}")
-            # 连接失败时不重试，直接返回
-            return None
-        except httpx.ConnectTimeout as e:
-            print(f"⚠️ Cloudflare Solver API 连接超时: {e}")
-            # 连接超时时不重试，直接返回
-            return None
         except Exception as e:
             print(f"⚠️ Cloudflare Solver API 调用失败: {e}")
         
