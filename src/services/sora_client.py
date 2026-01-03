@@ -313,7 +313,7 @@ class SoraClient:
                             continue
                 
                 # 429 retry logic
-                if response.status_code == 429 and (infinite_retry_429 or attempt < max_retries):
+                if response.status_code == 429 and attempt < max_retries:
                     # Get retry-after header or use exponential backoff
                     retry_after = response.headers.get("Retry-After")
                     if retry_after:
@@ -326,10 +326,9 @@ class SoraClient:
                     # Add small jitter to spread retries
                     wait_time += random.uniform(0.2, 0.8)
                     
-                    retry_msg = "无限" if infinite_retry_429 else f"{attempt + 1}/{max_retries}"
                     cf_msg = " (CF)" if is_cf else ""
-                    print(f"⚠️ 429 速率限制{cf_msg}，{wait_time:.0f}秒后重试 ({retry_msg})")
-                    debug_logger.log_info(f"429 rate limit{cf_msg}, retry after {wait_time}s ({retry_msg})")
+                    print(f"⚠️ 429 速率限制{cf_msg}，{wait_time:.0f}秒后重试 ({attempt + 1}/{max_retries})")
+                    debug_logger.log_info(f"429 rate limit{cf_msg}, retry after {wait_time}s ({attempt + 1}/{max_retries})")
                     await asyncio.sleep(wait_time)
                     attempt += 1
                     continue
@@ -1104,7 +1103,7 @@ class SoraClient:
             "n_frames": n_frames
         }
 
-        result = await self._make_request("POST", "/nf/create", token, json_data=json_data, add_sentinel_token=True, infinite_retry_429=True)
+        result = await self._make_request("POST", "/nf/create", token, json_data=json_data, add_sentinel_token=True)
         return result.get("id")
 
     async def generate_storyboard(self, prompt: str, token: str, orientation: str = "landscape",
@@ -1148,5 +1147,5 @@ class SoraClient:
             "video_caption": None
         }
 
-        result = await self._make_request("POST", "/nf/create/storyboard", token, json_data=json_data, add_sentinel_token=True, infinite_retry_429=True)
+        result = await self._make_request("POST", "/nf/create/storyboard", token, json_data=json_data, add_sentinel_token=True)
         return result.get("id")
