@@ -13,6 +13,7 @@ from .cloudflare_solver import (
     solve_cloudflare_challenge,
     is_cloudflare_challenge,
     get_cloudflare_state,
+    is_cf_refreshing,
 )
 from ..core.config import config
 from ..core.logger import debug_logger
@@ -106,7 +107,7 @@ class SoraClient:
 
     async def _get_session(self, token: str) -> AsyncSession:
         """获取或创建持久化 session，并应用全局 Cloudflare cookies"""
-        cf_state = get_cloudflare_state()
+        cf_state = get_cloudflare_state(token=token)
         
         if token not in self._sessions:
             self._sessions[token] = AsyncSession(impersonate="chrome120")
@@ -124,7 +125,7 @@ class SoraClient:
                            multipart: Optional[Dict] = None,
                            add_sentinel_token: bool = False,
                            max_retries: int = 3,
-                           infinite_retry_429: bool = False) -> Dict[str, Any]:
+                           token_id: Optional[int] = None) -> Dict[str, Any]:
         """Make HTTP request with proxy support and 429 retry
 
         Args:
@@ -134,13 +135,13 @@ class SoraClient:
             json_data: JSON request body
             multipart: Multipart form data (for file uploads)
             add_sentinel_token: Whether to add openai-sentinel-token header (only for generation requests)
-            max_retries: Maximum number of retries for 429 errors (ignored if infinite_retry_429=True)
-            infinite_retry_429: If True, retry 429 errors infinitely until success
+            max_retries: Maximum number of retries for 429/CF errors
+            token_id: Token ID for getting token-specific proxy (optional)
         """
         import asyncio
         
-        proxy_url = await self.proxy_manager.get_proxy_url()
-        cf_state = get_cloudflare_state()
+        proxy_url = await self.proxy_manager.get_proxy_url(token_id)
+        cf_state = get_cloudflare_state(token_id=token_id, token=token)
 
         # 使用全局 Cloudflare 状态的 user_agent，如果有的话
         user_agent = cf_state.user_agent or DEFAULT_USER_AGENT
@@ -160,11 +161,11 @@ class SoraClient:
         session = await self._get_session(token)
         
         attempt = 0
-        while True:
-            # Check if we should stop retrying (only for non-infinite mode)
-            if not infinite_retry_429 and attempt > max_retries:
-                break
-            
+        cf_refresh_attempted = False
+        cf_retry_count = 0  # CF challenge retry counter (max 3 when CF solver disabled)
+        MAX_CF_RETRY_WITHOUT_SOLVER = 3  # Max retries when CF solver is disabled
+        
+        while attempt <= max_retries:
             # 每次请求前更新 headers 中的 User-Agent（使用全局状态）
             if cf_state.user_agent:
                 headers["User-Agent"] = cf_state.user_agent
@@ -206,7 +207,7 @@ class SoraClient:
             elif method == "POST":
                 response = await session.post(url, **kwargs)
             else:
-                raise ValueError(f"Unsupported method: {method}")
+                raise ValueError(f"不支持的请求方法: {method}")
 
             # Calculate duration
             duration_ms = (time.time() - start_time) * 1000
@@ -234,25 +235,85 @@ class SoraClient:
                     response.text
                 )
                 
-                # 如果是 Cloudflare challenge，获取新的 cookie（会自动更新全局状态）
-                if is_cf:
-                    print(f"🔄 检测到 Cloudflare challenge ({response.status_code}, attempt {attempt + 1})，重新获取 cookie...")
-                    try:
-                        # solve_cloudflare_challenge 会自动更新全局状态
-                        cf_result = await solve_cloudflare_challenge(proxy_url)
-                        if cf_result:
-                            # 全局状态已更新，重新应用到当前 session
-                            cf_state.apply_to_session(session)
-                            if cf_state.user_agent:
-                                headers["User-Agent"] = cf_state.user_agent
-                            
+                # If CF challenge detected but CF solver is disabled, limit retries
+                if is_cf and not config.cf_enabled:
+                    cf_retry_count += 1
+                    if cf_retry_count >= MAX_CF_RETRY_WITHOUT_SOLVER:
+                        error_msg = f"检测到 Cloudflare 挑战但 CF Solver 未启用，已重试 {cf_retry_count} 次。请启用 CF Solver 或更换代理"
+                        print(f"❌ {error_msg}")
+                        debug_logger.log_error(
+                            error_message=error_msg,
+                            status_code=response.status_code,
+                            response_text=response.text
+                        )
+                        raise Exception(error_msg)
+                    else:
+                        wait_time = min((cf_retry_count + 1) * 3, 15) + random.uniform(0.5, 1.5)
+                        print(f"⚠️ CF challenge (CF Solver 未启用)，{wait_time:.1f}秒后重试 ({cf_retry_count}/{MAX_CF_RETRY_WITHOUT_SOLVER})")
+                        await asyncio.sleep(wait_time)
+                        attempt += 1
+                        continue
+                
+                # If Cloudflare challenge, try to refresh credentials (but not too frequently)
+                if is_cf and config.cf_enabled:
+                    # Only refresh if we haven't already tried in this request cycle
+                    if not cf_refresh_attempted:
+                        # Check if another request is already refreshing CF credentials
+                        if is_cf_refreshing(token_id=token_id, token=token):
+                            # Wait silently, solve_cloudflare_challenge will print logs
+                            await asyncio.sleep(random.uniform(2, 4))
                             attempt += 1
                             continue
-                    except Exception as cf_error:
-                        print(f"⚠️ Cloudflare 解决失败: {cf_error}")
+                        
+                        print(f"🔄 检测到 CF challenge ({response.status_code})，获取凭据...")
+                        cf_state.invalidate()  # Mark as invalid first
+                        
+                        try:
+                            cf_result = await solve_cloudflare_challenge(
+                                proxy_url,
+                                force_refresh=True,
+                                token_id=token_id,
+                                token=token,
+                                bypass_cooldown=False  # Respect cooldown to avoid hammering CF solver
+                            )
+                            cf_refresh_attempted = True
+                            if cf_result:
+                                # Jitter to avoid thundering herd after challenge refresh
+                                await asyncio.sleep(random.uniform(0.3, 1.0))
+                                # Global state updated, re-apply to current session
+                                cf_state.apply_to_session(session)
+                                if cf_state.user_agent:
+                                    headers["User-Agent"] = cf_state.user_agent
+                                
+                                attempt += 1
+                                continue
+                            else:
+                                # CF solver failed, retry without refreshing again
+                                if attempt < max_retries:
+                                    wait_time = min((attempt + 1) * 3, 30) + random.uniform(0.5, 1.5)
+                                    print(f"⚠️ CF 凭据获取失败，{wait_time:.1f}秒后重试")
+                                    await asyncio.sleep(wait_time)
+                                    attempt += 1
+                                    continue
+                        except Exception as cf_error:
+                            print(f"⚠️ CF 解决失败: {cf_error}")
+                            # Still retry if attempts remain
+                            if attempt < max_retries:
+                                wait_time = min((attempt + 1) * 3, 30) + random.uniform(0.5, 1.5)
+                                await asyncio.sleep(wait_time)
+                                attempt += 1
+                                continue
+                    else:
+                        # Already tried refreshing CF credentials, just retry with existing ones
+                        if attempt < max_retries:
+                            wait_time = min((attempt + 1) * 3, 30) + random.uniform(0.5, 1.5)
+                            print(f"⚠️ CF challenge 持续，{wait_time:.1f}秒后重试")
+                            await asyncio.sleep(wait_time)
+                            attempt += 1
+                            continue
                 
-                # 只有 429 才进行普通重试
-                if response.status_code == 429 and (infinite_retry_429 or attempt < max_retries):
+                # 429 retry logic
+                if response.status_code == 429 and attempt < max_retries:
                     # Get retry-after header or use exponential backoff
                     retry_after = response.headers.get("Retry-After")
                     if retry_after:
@@ -262,19 +323,36 @@ class SoraClient:
                             wait_time = min((attempt + 1) * 2, 30)  # Cap at 30 seconds
                     else:
                         wait_time = min((attempt + 1) * 2, 30)  # Exponential backoff, cap at 30s
+                    # Add small jitter to spread retries
+                    wait_time += random.uniform(0.2, 0.8)
                     
-                    retry_msg = "infinite" if infinite_retry_429 else f"{attempt + 1}/{max_retries}"
-                    cf_msg = " (Cloudflare challenge)" if is_cf else ""
-                    print(f"⚠️ 429 Rate limit{cf_msg}, retrying in {wait_time}s (attempt {retry_msg})")
-                    debug_logger.log_info(f"429 Rate limit{cf_msg}, waiting {wait_time}s before retry {retry_msg}")
+                    cf_msg = " (CF)" if is_cf else ""
+                    print(f"⚠️ 429 速率限制{cf_msg}，{wait_time:.0f}秒后重试 ({attempt + 1}/{max_retries})")
+                    debug_logger.log_info(f"429 rate limit{cf_msg}, retry after {wait_time}s ({attempt + 1}/{max_retries})")
                     await asyncio.sleep(wait_time)
                     attempt += 1
                     continue
                 elif response.status_code == 429:
-                    error_msg = f"Rate limit exceeded after {max_retries} retries"
+                    error_msg = f"速率限制超过 {max_retries} 次重试"
                     debug_logger.log_error(
                         error_message=error_msg,
                         status_code=429,
+                        response_text=response.text
+                    )
+                    raise Exception(error_msg)
+                
+                # 403 retry logic (non-CF or CF detection failed)
+                if response.status_code == 403 and attempt < max_retries:
+                    wait_time = min((attempt + 1) * 2, 30) + random.uniform(0.2, 0.8)
+                    print(f"⚠️ 403 禁止访问，{wait_time:.1f}秒后重试 (尝试 {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                    attempt += 1
+                    continue
+                elif response.status_code == 403:
+                    error_msg = f"403 禁止访问，超过 {max_retries} 次重试"
+                    debug_logger.log_error(
+                        error_message=error_msg,
+                        status_code=403,
                         response_text=response.text
                     )
                     raise Exception(error_msg)
@@ -292,7 +370,7 @@ class SoraClient:
                 if error_detail:
                     error_msg = f"{error_detail}"
                 else:
-                    error_msg = f"API request failed: {response.status_code} - {response.text}"
+                    error_msg = f"API 请求失败: {response.status_code} - {response.text}"
                 
                 # Check for non-retryable errors (401, insufficient balance, etc.)
                 is_auth_error = response.status_code == 401
@@ -302,8 +380,8 @@ class SoraClient:
                 ])
                 
                 # Print error to console
-                print(f"❌ [SoraClient] {method} {url} failed: {response.status_code}")
-                print(f"   Response: {response.text[:500] if response.text else 'No response body'}")
+                print(f"❌ [SoraClient] {method} {url} 失败: {response.status_code}")
+                print(f"   响应: {response.text[:500] if response.text else '无响应体'}")
                 
                 debug_logger.log_error(
                     error_message=error_msg,
@@ -315,10 +393,10 @@ class SoraClient:
                 if is_auth_error or is_balance_error:
                     raise Exception(error_msg)
                 
-                # For other errors in infinite retry mode, retry
-                if infinite_retry_429 and response.status_code >= 500:
+                # For 5xx server errors, retry if attempts remain
+                if response.status_code >= 500 and attempt < max_retries:
                     wait_time = min((attempt + 1) * 2, 30)
-                    print(f"⚠️ Server error {response.status_code}, retrying in {wait_time}s...")
+                    print(f"⚠️ 服务器错误 {response.status_code}，{wait_time} 秒后重试 ({attempt + 1}/{max_retries})...")
                     await asyncio.sleep(wait_time)
                     attempt += 1
                     continue
@@ -326,6 +404,9 @@ class SoraClient:
                 raise Exception(error_msg)
 
             return response_json if response_json else response.json()
+        
+        # If we exit the loop without returning, all retries exhausted
+        raise Exception(f"请求失败，已重试 {max_retries} 次")
     
     async def get_user_info(self, token: str) -> Dict[str, Any]:
         """Get user information"""
@@ -460,13 +541,14 @@ class SoraClient:
             "inpaint_items": inpaint_items
         }
 
-        # 生成请求需要添加 sentinel token，429 无限重试
-        result = await self._make_request("POST", "/video_gen", token, json_data=json_data, add_sentinel_token=True, infinite_retry_429=True)
+        # 生成请求需要添加 sentinel token，429 最多重试 10 次
+        result = await self._make_request("POST", "/video_gen", token, json_data=json_data, add_sentinel_token=True, max_retries=10)
         return result["id"]
     
     async def generate_video(self, prompt: str, token: str, orientation: str = "landscape",
                             media_id: Optional[str] = None, n_frames: int = 450,
-                            style_id: Optional[str] = None) -> str:
+                            style_id: Optional[str] = None,
+                            model: str = "sy_8", size: str = "small") -> str:
         """Generate video (text-to-video or image-to-video)
         
         Args:
@@ -474,8 +556,10 @@ class SoraClient:
             token: Access token
             orientation: Video orientation (portrait/landscape)
             media_id: Optional media ID for image-to-video
-            n_frames: Number of frames (150=5s, 300=10s, 450=15s, 600=20s)
+            n_frames: Number of frames (150=5s, 300=10s, 450=15s, 600=20s, 750=25s)
             style_id: Optional style ID (festive, retro, news, selfie, handheld, anime, comic, golden, vintage)
+            model: Model to use (sy_8 for standard, sy_ore for pro)
+            size: Video size (small for standard, large for HD)
         """
         inpaint_items = []
         if media_id:
@@ -488,9 +572,9 @@ class SoraClient:
             "kind": "video",
             "prompt": prompt,
             "orientation": orientation,
-            "size": "small",
+            "size": size,
             "n_frames": n_frames,
-            "model": "sy_8",
+            "model": model,
             "inpaint_items": inpaint_items
         }
         
@@ -498,8 +582,8 @@ class SoraClient:
         if style_id:
             json_data["style_id"] = style_id.lower()
 
-        # 生成请求需要添加 sentinel token，429 无限重试
-        result = await self._make_request("POST", "/nf/create", token, json_data=json_data, add_sentinel_token=True, infinite_retry_429=True)
+        # 生成请求需要添加 sentinel token，429 最多重试 10 次
+        result = await self._make_request("POST", "/nf/create", token, json_data=json_data, add_sentinel_token=True, max_retries=10)
         return result["id"]
     
     async def get_image_tasks(self, token: str, limit: int = 20) -> Dict[str, Any]:

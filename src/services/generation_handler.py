@@ -434,7 +434,9 @@ class GenerationHandler:
                         orientation=model_config["orientation"],
                         media_id=media_id,
                         n_frames=n_frames,
-                        style_id=style_id
+                        style_id=style_id,
+                        model=model_config.get("model", "sy_8"),
+                        size=model_config.get("size", "small")
                     )
             else:
                 task_id = await self.sora_client.generate_image(
@@ -1621,7 +1623,9 @@ class GenerationHandler:
             task_id = await self.sora_client.generate_video(
                 full_prompt, token_obj.token,
                 orientation=model_config["orientation"],
-                n_frames=n_frames
+                n_frames=n_frames,
+                model=model_config.get("model", "sy_8"),
+                size=model_config.get("size", "small")
             )
             debug_logger.log_info(f"Video generation started, task_id: {task_id}")
 

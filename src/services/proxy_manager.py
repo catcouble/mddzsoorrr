@@ -70,8 +70,12 @@ class ProxyManager:
         print(f"⚠️ Unknown proxy format: {line}")
         return line
     
-    async def get_proxy_url(self) -> Optional[str]:
-        """Get proxy URL if enabled, with pool rotation support"""
+    async def get_proxy_url(self, token_id: Optional[int] = None) -> Optional[str]:
+        """Get proxy URL if enabled, with pool rotation support
+        
+        Args:
+            token_id: Optional token ID for token-specific proxy (reserved for future use)
+        """
         config = await self.db.get_proxy_config()
         
         if not config.proxy_enabled:

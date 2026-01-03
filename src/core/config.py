@@ -208,28 +208,73 @@ class Config:
             self._config["token_refresh"] = {}
         self._config["token_refresh"]["at_auto_refresh_enabled"] = enabled
 
-    # Cloudflare Solver 配置
+    # ==================== Cloudflare Configuration ====================
+    
     @property
-    def cloudflare_solver_enabled(self) -> bool:
+    def cf_enabled(self) -> bool:
         """Get Cloudflare solver enabled status"""
-        return self._config.get("cloudflare", {}).get("solver_enabled", False)
+        return self._config.get("cloudflare", {}).get("enabled", False)
 
-    def set_cloudflare_solver_enabled(self, enabled: bool):
+    def set_cf_enabled(self, enabled: bool):
         """Set Cloudflare solver enabled/disabled"""
         if "cloudflare" not in self._config:
             self._config["cloudflare"] = {}
-        self._config["cloudflare"]["solver_enabled"] = enabled
+        self._config["cloudflare"]["enabled"] = enabled
+
+    @property
+    def cf_api_key(self) -> str:
+        """Get Cloudflare solver API key"""
+        return self._config.get("cloudflare", {}).get("api_key", "")
+
+    def set_cf_api_key(self, key: str):
+        """Set Cloudflare solver API key"""
+        if "cloudflare" not in self._config:
+            self._config["cloudflare"] = {}
+        self._config["cloudflare"]["api_key"] = key
+
+    @property
+    def cf_api_url(self) -> str:
+        """Get Cloudflare solver base URL (e.g., http://localhost:8000)"""
+        return self._config.get("cloudflare", {}).get("api_url", "http://localhost:8000")
+
+    def set_cf_api_url(self, url: str):
+        """Set Cloudflare solver base URL"""
+        if "cloudflare" not in self._config:
+            self._config["cloudflare"] = {}
+        self._config["cloudflare"]["api_url"] = url
+
+    @property
+    def cf_global_enabled(self) -> bool:
+        """Get Cloudflare global mode enabled (use CF for all requests)"""
+        return self._config.get("cloudflare", {}).get("global_enabled", False)
+
+    def set_cf_global_enabled(self, enabled: bool):
+        """Set Cloudflare global mode enabled/disabled"""
+        if "cloudflare" not in self._config:
+            self._config["cloudflare"] = {}
+        self._config["cloudflare"]["global_enabled"] = enabled
+
+    @property
+    def cf_api_only_enabled(self) -> bool:
+        """Get Cloudflare API-only mode enabled (use CF only for API requests)"""
+        return self._config.get("cloudflare", {}).get("api_only_enabled", True)
+
+    def set_cf_api_only_enabled(self, enabled: bool):
+        """Set Cloudflare API-only mode enabled/disabled"""
+        if "cloudflare" not in self._config:
+            self._config["cloudflare"] = {}
+        self._config["cloudflare"]["api_only_enabled"] = enabled
+
+    # Legacy aliases for backward compatibility
+    @property
+    def cloudflare_solver_enabled(self) -> bool:
+        """Legacy alias for cf_enabled"""
+        return self.cf_enabled
 
     @property
     def cloudflare_solver_api_url(self) -> str:
-        """Get Cloudflare solver API URL"""
-        return self._config.get("cloudflare", {}).get("solver_api_url", "http://localhost:8000/v1/challenge")
-
-    def set_cloudflare_solver_api_url(self, url: str):
-        """Set Cloudflare solver API URL"""
-        if "cloudflare" not in self._config:
-            self._config["cloudflare"] = {}
-        self._config["cloudflare"]["solver_api_url"] = url
+        """Legacy alias for cf_api_url"""
+        return self.cf_api_url
 
 # Global config instance
 config = Config()

@@ -7,32 +7,32 @@ from ..core.config import config
 
 
 class CloudflareState:
-    """全局 Cloudflare 状态管理器
+    """Global Cloudflare state manager
     
-    维护全局共享的 cf_clearance cookies 和 user_agent，
-    所有请求都使用相同的凭据，直到遇到新的 429 challenge 或凭据过期。
+    Maintains globally shared cf_clearance cookies and user_agent.
+    All requests use the same credentials until a new 429 challenge or expiration.
     
-    特性：
-    - 线程安全（使用 threading.RLock 避免死锁）
-    - 凭据有效期 10 分钟，自动过期
-    - 遇到 429/403 时自动标记凭据无效
-    - 读操作使用快照避免长时间持锁
+    Features:
+    - Thread-safe (uses threading.RLock to avoid deadlocks)
+    - Credentials valid for 10 minutes, auto-expire
+    - Auto-invalidate on 429/403
+    - Read operations use snapshots to avoid long lock holding
     """
     
-    # 凭据有效期（秒）
-    CREDENTIAL_TTL = 600  # 10 分钟
+    # Credential TTL (seconds)
+    CREDENTIAL_TTL = 600  # 10 minutes
     
     def __init__(self):
         self._cookies: Dict[str, str] = {}
         self._user_agent: Optional[str] = None
         self._last_updated: Optional[datetime] = None
         self._is_valid: bool = False
-        # 使用 RLock 避免同一线程重入死锁
+        # Use RLock to avoid same-thread reentry deadlock
         self._lock = threading.RLock()
     
     @property
     def cookies(self) -> Dict[str, str]:
-        """获取当前的 Cloudflare cookies"""
+        """Get current Cloudflare cookies"""
         with self._lock:
             if not self._check_validity():
                 return {}
@@ -40,7 +40,7 @@ class CloudflareState:
     
     @property
     def user_agent(self) -> Optional[str]:
-        """获取当前的 User-Agent"""
+        """Get current User-Agent"""
         with self._lock:
             if not self._check_validity():
                 return None
@@ -48,19 +48,19 @@ class CloudflareState:
     
     @property
     def is_valid(self) -> bool:
-        """检查是否有有效的 Cloudflare 凭据"""
+        """Check if valid Cloudflare credentials exist"""
         with self._lock:
             return self._check_validity()
     
     @property
     def last_updated(self) -> Optional[datetime]:
-        """获取最后更新时间"""
+        """Get last update time"""
         with self._lock:
             return self._last_updated
     
     @property
     def expires_at(self) -> Optional[datetime]:
-        """获取凭据过期时间"""
+        """Get credential expiration time"""
         with self._lock:
             if self._last_updated:
                 return self._last_updated + timedelta(seconds=self.CREDENTIAL_TTL)
@@ -68,7 +68,7 @@ class CloudflareState:
     
     @property
     def remaining_seconds(self) -> int:
-        """获取剩余有效时间（秒）"""
+        """Get remaining valid time (seconds)"""
         with self._lock:
             if not self._last_updated or not self._is_valid:
                 return 0
@@ -77,12 +77,12 @@ class CloudflareState:
             return max(0, int(remaining))
     
     def _check_validity(self) -> bool:
-        """检查凭据是否有效（内部方法，不加锁）"""
+        """Check if credentials are valid (internal method, no lock)"""
         if not self._is_valid or not self._cookies or not self._user_agent:
             return False
         if not self._last_updated:
             return False
-        # 检查是否过期
+        # Check expiration
         expires = self._last_updated + timedelta(seconds=self.CREDENTIAL_TTL)
         if datetime.now() > expires:
             self._is_valid = False
@@ -90,10 +90,9 @@ class CloudflareState:
         return True
     
     def get_status(self) -> Dict[str, Any]:
-        """获取当前状态信息"""
+        """Get current status info"""
         with self._lock:
             is_valid = self._check_validity()
-            # 直接计算 remaining_seconds，避免调用属性导致死锁
             remaining = 0
             if is_valid and self._last_updated:
                 expires = self._last_updated + timedelta(seconds=self.CREDENTIAL_TTL)
@@ -109,12 +108,7 @@ class CloudflareState:
             }
     
     def update(self, cookies: Dict[str, str], user_agent: str):
-        """更新 Cloudflare 凭据（同步方法）
-        
-        Args:
-            cookies: 新的 cookies 字典
-            user_agent: 新的 User-Agent
-        """
+        """Update Cloudflare credentials (sync method)"""
         with self._lock:
             self._cookies = cookies.copy()
             self._user_agent = user_agent
@@ -123,17 +117,17 @@ class CloudflareState:
             print(f"✅ 全局 Cloudflare 凭据已更新 (cookies: {list(cookies.keys())}, ua: {user_agent[:50]}...)")
     
     async def update_async(self, cookies: Dict[str, str], user_agent: str):
-        """更新 Cloudflare 凭据（异步方法）"""
+        """Update Cloudflare credentials (async method)"""
         self.update(cookies, user_agent)
     
     def invalidate(self):
-        """标记凭据无效（遇到 429/403 时调用）"""
+        """Mark credentials as invalid (called on 429/403)"""
         with self._lock:
             self._is_valid = False
             print("⚠️ Cloudflare 凭据已标记为无效")
     
     def clear(self):
-        """清除 Cloudflare 凭据（同步方法）"""
+        """Clear Cloudflare credentials (sync method)"""
         with self._lock:
             self._cookies = {}
             self._user_agent = None
@@ -142,16 +136,11 @@ class CloudflareState:
             print("🗑️ 全局 Cloudflare 凭据已清除")
     
     async def clear_async(self):
-        """清除 Cloudflare 凭据（异步方法）"""
+        """Clear Cloudflare credentials (async method)"""
         self.clear()
     
     def apply_to_session(self, session, domain: str = ".sora.chatgpt.com"):
-        """将 cookies 应用到 session
-        
-        Args:
-            session: curl_cffi AsyncSession 实例
-            domain: cookie 域名
-        """
+        """Apply cookies to session"""
         with self._lock:
             if not self._check_validity():
                 return
@@ -159,144 +148,179 @@ class CloudflareState:
                 session.cookies.set(name, value, domain=domain)
     
     def get_headers_update(self) -> Dict[str, str]:
-        """获取需要更新的请求头
-        
-        Returns:
-            包含 User-Agent 的字典（如果有）
-        """
+        """Get headers to update"""
         with self._lock:
             if self._check_validity() and self._user_agent:
                 return {"User-Agent": self._user_agent}
             return {}
 
 
-# 全局单例
-_cf_state = CloudflareState()
+# Global per-token state
+_cf_states: Dict[str, CloudflareState] = {}
+_cf_solving_locks: Dict[str, asyncio.Lock] = {}
+_cf_refreshing: Dict[str, bool] = {}  # Flag indicating if refresh is in progress
+
+MIN_CF_REFRESH_INTERVAL = 30  # seconds
 
 
-def get_cloudflare_state() -> CloudflareState:
-    """获取全局 Cloudflare 状态管理器"""
-    return _cf_state
+def _state_key(token_id: Optional[int], token: Optional[str]) -> str:
+    if token_id is not None:
+        return f"token_id:{token_id}"
+    if token:
+        return f"token:{token}"
+    return "global"
+
+
+def is_cf_refreshing(token_id: Optional[int] = None, token: Optional[str] = None) -> bool:
+    """Check if another request is refreshing CF credentials"""
+    key = _state_key(token_id, token)
+    return _cf_refreshing.get(key, False)
+
+
+def get_cloudflare_state(token_id: Optional[int] = None, token: Optional[str] = None) -> CloudflareState:
+    """Get Cloudflare state manager for a token or fallback to global"""
+    key = _state_key(token_id, token)
+    state = _cf_states.get(key)
+    if state is None:
+        state = CloudflareState()
+        _cf_states[key] = state
+    return state
+
+
+def _get_solving_lock(key: str) -> asyncio.Lock:
+    lock = _cf_solving_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _cf_solving_locks[key] = lock
+    return lock
 
 
 async def solve_cloudflare_challenge(
-    proxy_url: Optional[str] = None, max_retries: int = 1
+    proxy_url: Optional[str] = None, max_retries: int = 1, force_refresh: bool = False,
+    token_id: Optional[int] = None, token: Optional[str] = None, bypass_cooldown: bool = False,
+    timeout: int = 30
 ) -> Optional[Dict[str, Any]]:
-    """解决 Cloudflare challenge 并更新全局状态
+    """Solve Cloudflare challenge and update global state
     
-    使用配置的 Cloudflare Solver API，最多重试指定次数。
-    成功后会自动更新全局 Cloudflare 状态。
+    Prevents concurrent calls: if a request is already solving the challenge,
+    other requests will wait for the result instead of making duplicate calls.
     
     Args:
-        proxy_url: 代理 URL（当前未使用，保留接口兼容性）
-        max_retries: 最大重试次数
-        
-    Returns:
-        包含 cookies 和 user_agent 的字典，如 {"cookies": {...}, "user_agent": "..."}
-        失败返回 None
+        timeout: Maximum time to wait for CF Solver response (default 30s)
     """
     import concurrent.futures
     import urllib.request
     import json
     import socket
     
-    if not config.cloudflare_solver_enabled or not config.cloudflare_solver_api_url:
+    if not config.cf_enabled or not config.cf_api_url:
         print("⚠️ Cloudflare Solver API 未配置或未启用")
         return None
     
-    api_url = config.cloudflare_solver_api_url
-    # 自动补全 /v1/challenge 路径
-    if not api_url.endswith('/v1/challenge'):
-        api_url = api_url.rstrip('/') + '/v1/challenge'
+    key = _state_key(token_id, token)
+    cf_state = get_cloudflare_state(token_id=token_id, token=token)
+    lock = _get_solving_lock(key)
+
+    # 检查是否有其他请求正在刷新，如果是则静默等待
+    is_waiting = lock.locked()
+    if is_waiting:
+        print(f"⏳ 等待其他请求获取 CF 凭据...")
     
-    def _sync_request():
-        """同步请求函数，在独立线程中执行，使用标准库"""
+    # Use lock to prevent concurrent CF Solver calls
+    async with lock:
+        # If credentials are still valid and not force refresh, return directly
+        if not force_refresh and cf_state.is_valid:
+            # 如果是等待后获得凭据，静默返回；否则显示复用日志
+            if not is_waiting:
+                print("✅ 使用现有有效的 Cloudflare 凭据")
+            return {"cookies": cf_state.cookies, "user_agent": cf_state.user_agent}
+        
+        # 标记正在刷新
+        _cf_refreshing[key] = True
+        
         try:
-            print(f"🔄 [线程] 开始请求 Cloudflare Solver API: {api_url}")
+            refresh_msg = "（强制刷新）" if force_refresh else ""
+            print(f"🔄 开始获取 Cloudflare 凭据...{refresh_msg}")
             
-            req = urllib.request.Request(api_url)
-            req.add_header('User-Agent', 'Mozilla/5.0')
+            # Build full API URL
+            base_url = config.cf_api_url.rstrip('/')
+            api_url = f"{base_url}/v1/challenge"
+            if force_refresh:
+                api_url = f"{api_url}?skip_cache=true"
             
-            # Solver 需要时间完成验证，设置 120 秒超时
-            with urllib.request.urlopen(req, timeout=120) as response:
-                status_code = response.getcode()
-                data = json.loads(response.read().decode('utf-8'))
-                print(f"🔄 [线程] 请求完成，状态码: {status_code}")
-                return {"status_code": status_code, "data": data}
-        except urllib.error.URLError as e:
-            print(f"⚠️ [线程] URL错误: {e.reason}")
-            return None
-        except socket.timeout:
-            print(f"⚠️ [线程] Socket超时 (120秒)")
-            return None
-        except Exception as e:
-            print(f"⚠️ [线程] 请求异常: {type(e).__name__}: {e}")
-            return None
-    
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"🔄 调用 Cloudflare Solver API: {api_url} (尝试 {attempt}/{max_retries})")
+            # Use the timeout parameter for socket timeout
+            socket_timeout = timeout
             
-            # 使用 ThreadPoolExecutor 确保在独立线程中执行
-            loop = asyncio.get_running_loop()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            def _sync_request():
+                """Sync request function, executed in separate thread"""
                 try:
-                    # 设置 130 秒超时（比 socket 超时稍长）
-                    result = await asyncio.wait_for(
-                        loop.run_in_executor(executor, _sync_request),
-                        timeout=130
-                    )
-                except asyncio.TimeoutError:
-                    print(f"⚠️ Cloudflare Solver API 请求超时 (130秒)")
+                    req = urllib.request.Request(api_url)
+                    req.add_header('User-Agent', 'Mozilla/5.0')
+                    if config.cf_api_key:
+                        req.add_header('Authorization', f'Bearer {config.cf_api_key}')
+                    with urllib.request.urlopen(req, timeout=socket_timeout) as response:
+                        status_code = response.getcode()
+                        data = json.loads(response.read().decode('utf-8'))
+                        return {"status_code": status_code, "data": data}
+                except urllib.error.URLError as e:
+                    print(f"⚠️ CF Solver URL 错误: {e.reason}")
+                    return None
+                except socket.timeout:
+                    print(f"⚠️ CF Solver 超时 ({socket_timeout}秒)")
+                    return None
+                except Exception as e:
+                    print(f"⚠️ CF Solver 异常: {type(e).__name__}: {e}")
                     return None
             
-            if result is None:
-                print(f"⚠️ Cloudflare Solver API 请求失败")
-                return None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    loop = asyncio.get_running_loop()
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        try:
+                            result = await asyncio.wait_for(
+                                loop.run_in_executor(executor, _sync_request),
+                                timeout=timeout + 5  # Add 5s buffer for async overhead
+                            )
+                        except asyncio.TimeoutError:
+                            print(f"⚠️ CF Solver 请求超时 ({timeout}秒)")
+                            return None
+                    
+                    if result is None:
+                        print("⚠️ CF Solver 请求失败")
+                        return None
+                    
+                    if result["status_code"] == 200:
+                        data = result["data"]
+                        if data.get("success"):
+                            cookies = data.get("cookies", {})
+                            user_agent = data.get("user_agent")
+                            elapsed = data.get("elapsed_seconds", 0)
+                            print(f"✅ CF 凭据获取成功，耗时 {elapsed:.2f}s")
+                            if cookies and user_agent:
+                                cf_state.update(cookies, user_agent)
+                            return {"cookies": cookies, "user_agent": user_agent}
+                        else:
+                            print(f"⚠️ CF Solver 返回失败: {data.get('error')}")
+                    else:
+                        print(f"⚠️ CF Solver 请求失败: {result['status_code']}")
+                
+                except Exception as e:
+                    print(f"⚠️ CF Solver 调用失败: {type(e).__name__}: {e}")
+                
+                if attempt < max_retries:
+                    await asyncio.sleep(2)
             
-            if result["status_code"] == 200:
-                data = result["data"]
-                if data.get("success"):
-                    cookies = data.get("cookies", {})
-                    user_agent = data.get("user_agent")
-                    elapsed = data.get("elapsed_seconds", 0)
-                    print(f"✅ Cloudflare Solver API 返回成功，耗时 {elapsed:.2f}s")
-                    
-                    # 更新全局状态
-                    if cookies and user_agent:
-                        _cf_state.update(cookies, user_agent)
-                    
-                    return {"cookies": cookies, "user_agent": user_agent}
-                else:
-                    print(f"⚠️ Cloudflare Solver API 返回失败: {data.get('error')}")
-            else:
-                print(f"⚠️ Cloudflare Solver API 请求失败: {result['status_code']}")
-        
-        except Exception as e:
-            print(f"⚠️ Cloudflare Solver API 调用失败: {type(e).__name__}: {e}")
-        
-        # 如果不是最后一次尝试，等待后重试
-        if attempt < max_retries:
-            await asyncio.sleep(2)
-    
-    print(f"❌ Cloudflare Solver API 调用失败")
-    return None
+            print("❌ CF 凭据获取失败")
+            return None
+        finally:
+            # 无论成功失败都清除刷新标记
+            _cf_refreshing[key] = False
 
 
 def is_cloudflare_challenge(status_code: int, headers: dict, response_text: str) -> bool:
-    """检测响应是否为 Cloudflare challenge
-    
-    Args:
-        status_code: HTTP 状态码
-        headers: 响应头
-        response_text: 响应文本
-    
-    Returns:
-        True 如果是 Cloudflare challenge
-    """
+    """Detect if response is a Cloudflare challenge"""
     if status_code not in [429, 403]:
         return False
-    
     return (
         "cf-mitigated" in str(headers)
         or "Just a moment" in response_text
