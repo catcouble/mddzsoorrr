@@ -1169,29 +1169,25 @@ class Database:
         from datetime import date
         async with self._connect() as db:
             today = str(date.today())
-            # Get current stats
-            cursor = await db.execute("SELECT today_date FROM token_stats WHERE token_id = ?", (token_id,))
-            row = await cursor.fetchone()
-            current_date = self._get_row_value(row, "today_date") or self._get_row_value(row, 0)
-
-            # If date changed, reset today's count
-            if row and current_date != today:
+            # Atomic update: reset today_count if date changed, otherwise increment
+            if self.db_type == "mysql":
+                # MySQL uses IF() function
                 await db.execute("""
                     UPDATE token_stats
                     SET image_count = image_count + 1,
-                        today_image_count = 1,
+                        today_image_count = IF(today_date = ?, today_image_count + 1, 1),
                         today_date = ?
                     WHERE token_id = ?
-                """, (today, token_id))
+                """, (today, today, token_id))
             else:
-                # Same day, just increment both
+                # SQLite uses CASE WHEN
                 await db.execute("""
                     UPDATE token_stats
                     SET image_count = image_count + 1,
-                        today_image_count = today_image_count + 1,
+                        today_image_count = CASE WHEN today_date = ? THEN today_image_count + 1 ELSE 1 END,
                         today_date = ?
                     WHERE token_id = ?
-                """, (today, token_id))
+                """, (today, today, token_id))
             await db.commit()
 
     async def increment_video_count(self, token_id: int):
@@ -1199,29 +1195,25 @@ class Database:
         from datetime import date
         async with self._connect() as db:
             today = str(date.today())
-            # Get current stats
-            cursor = await db.execute("SELECT today_date FROM token_stats WHERE token_id = ?", (token_id,))
-            row = await cursor.fetchone()
-            current_date = self._get_row_value(row, "today_date") or self._get_row_value(row, 0)
-
-            # If date changed, reset today's count
-            if row and current_date != today:
+            # Atomic update: reset today_count if date changed, otherwise increment
+            if self.db_type == "mysql":
+                # MySQL uses IF() function
                 await db.execute("""
                     UPDATE token_stats
                     SET video_count = video_count + 1,
-                        today_video_count = 1,
+                        today_video_count = IF(today_date = ?, today_video_count + 1, 1),
                         today_date = ?
                     WHERE token_id = ?
-                """, (today, token_id))
+                """, (today, today, token_id))
             else:
-                # Same day, just increment both
+                # SQLite uses CASE WHEN
                 await db.execute("""
                     UPDATE token_stats
                     SET video_count = video_count + 1,
-                        today_video_count = today_video_count + 1,
+                        today_video_count = CASE WHEN today_date = ? THEN today_video_count + 1 ELSE 1 END,
                         today_date = ?
                     WHERE token_id = ?
-                """, (today, token_id))
+                """, (today, today, token_id))
             await db.commit()
     
     async def increment_error_count(self, token_id: int):
@@ -1229,33 +1221,29 @@ class Database:
         from datetime import date
         async with self._connect() as db:
             today = str(date.today())
-            # Get current stats
-            cursor = await db.execute("SELECT today_date FROM token_stats WHERE token_id = ?", (token_id,))
-            row = await cursor.fetchone()
-            current_date = self._get_row_value(row, "today_date") or self._get_row_value(row, 0)
-
-            # If date changed, reset today's error count
-            if row and current_date != today:
+            # Atomic update: reset today_error_count if date changed, otherwise increment
+            if self.db_type == "mysql":
+                # MySQL uses IF() function
                 await db.execute("""
                     UPDATE token_stats
                     SET error_count = error_count + 1,
                         consecutive_error_count = consecutive_error_count + 1,
-                        today_error_count = 1,
+                        today_error_count = IF(today_date = ?, today_error_count + 1, 1),
                         today_date = ?,
                         last_error_at = CURRENT_TIMESTAMP
                     WHERE token_id = ?
-                """, (today, token_id))
+                """, (today, today, token_id))
             else:
-                # Same day, just increment all counters
+                # SQLite uses CASE WHEN
                 await db.execute("""
                     UPDATE token_stats
                     SET error_count = error_count + 1,
                         consecutive_error_count = consecutive_error_count + 1,
-                        today_error_count = today_error_count + 1,
+                        today_error_count = CASE WHEN today_date = ? THEN today_error_count + 1 ELSE 1 END,
                         today_date = ?,
                         last_error_at = CURRENT_TIMESTAMP
                     WHERE token_id = ?
-                """, (today, token_id))
+                """, (today, today, token_id))
             await db.commit()
     
     async def reset_error_count(self, token_id: int):
@@ -1454,32 +1442,31 @@ class Database:
             return CacheConfig(cache_enabled=False, cache_timeout=600)
 
     async def update_cache_config(self, enabled: bool = None, timeout: int = None, base_url: Optional[str] = None):
-        """Update cache configuration"""
+        """Update cache configuration - uses atomic COALESCE to avoid read-then-write"""
         async with self._connect() as db:
-            # Get current config first
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM cache_config WHERE id = 1")
-            row = await cursor.fetchone()
-
-            if row:
-                current = dict(row)
-                # Update only provided fields
-                new_enabled = enabled if enabled is not None else current.get("cache_enabled", False)
-                new_timeout = timeout if timeout is not None else current.get("cache_timeout", 600)
-                new_base_url = base_url if base_url is not None else current.get("cache_base_url")
-            else:
-                new_enabled = enabled if enabled is not None else False
-                new_timeout = timeout if timeout is not None else 600
-                new_base_url = base_url
-
             # Convert empty string to None
-            new_base_url = new_base_url if new_base_url else None
+            new_base_url = base_url if base_url else None
 
-            await db.execute("""
-                UPDATE cache_config
-                SET cache_enabled = ?, cache_timeout = ?, cache_base_url = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = 1
-            """, (new_enabled, new_timeout, new_base_url))
+            if self.db_type == "mysql":
+                # MySQL uses COALESCE and IFNULL for atomic update
+                await db.execute("""
+                    UPDATE cache_config
+                    SET cache_enabled = COALESCE(?, cache_enabled),
+                        cache_timeout = COALESCE(?, cache_timeout),
+                        cache_base_url = IF(? IS NOT NULL, ?, cache_base_url),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (enabled, timeout, base_url, new_base_url))
+            else:
+                # SQLite uses COALESCE for atomic update
+                await db.execute("""
+                    UPDATE cache_config
+                    SET cache_enabled = COALESCE(?, cache_enabled),
+                        cache_timeout = COALESCE(?, cache_timeout),
+                        cache_base_url = CASE WHEN ? IS NOT NULL THEN ? ELSE cache_base_url END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (enabled, timeout, base_url, new_base_url))
             await db.commit()
 
     # Generation config operations
@@ -1496,27 +1483,16 @@ class Database:
             return GenerationConfig(image_timeout=300, video_timeout=1500)
 
     async def update_generation_config(self, image_timeout: int = None, video_timeout: int = None):
-        """Update generation configuration"""
+        """Update generation configuration - uses atomic COALESCE to avoid read-then-write"""
         async with self._connect() as db:
-            # Get current config first
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM generation_config WHERE id = 1")
-            row = await cursor.fetchone()
-
-            if row:
-                current = dict(row)
-                # Update only provided fields
-                new_image_timeout = image_timeout if image_timeout is not None else current.get("image_timeout", 300)
-                new_video_timeout = video_timeout if video_timeout is not None else current.get("video_timeout", 1500)
-            else:
-                new_image_timeout = image_timeout if image_timeout is not None else 300
-                new_video_timeout = video_timeout if video_timeout is not None else 1500
-
+            # Use COALESCE for atomic update - only update fields that are provided
             await db.execute("""
                 UPDATE generation_config
-                SET image_timeout = ?, video_timeout = ?, updated_at = CURRENT_TIMESTAMP
+                SET image_timeout = COALESCE(?, image_timeout),
+                    video_timeout = COALESCE(?, video_timeout),
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
-            """, (new_image_timeout, new_video_timeout))
+            """, (image_timeout, video_timeout))
             await db.commit()
 
     # Token refresh config operations
