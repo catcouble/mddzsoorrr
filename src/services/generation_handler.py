@@ -1212,15 +1212,7 @@ class GenerationHandler:
             details: Additional details as a dictionary
 
         Returns:
-            Formatted SSE data string with structured reasoning_content:
-            {
-                "stage": "generation",
-                "status": "processing",
-                "progress": 50,
-                "message": "Video generation in progress...",
-                "details": {...},
-                "timestamp": 1234567890
-            }
+            Formatted SSE data string
         """
         chunk_id = f"chatcmpl-{int(datetime.now().timestamp() * 1000)}"
 
@@ -1230,29 +1222,25 @@ class GenerationHandler:
         if is_first:
             delta["role"] = "assistant"
 
-        # Add content fields
+        # Add content fields - only include if not None
         if content is not None:
             delta["content"] = content
-        else:
-            delta["content"] = None
 
-        # Build structured reasoning_content
+        # Build reasoning_content as string (OpenAI API expects string type)
+        # Include progress and stage info in the message
         if reasoning_content is not None or stage is not None:
-            structured_reasoning = {
-                "stage": stage or self._infer_stage_from_message(reasoning_content),
-                "status": status or self._infer_status_from_message(reasoning_content),
-                "progress": progress,
-                "message": reasoning_content.strip() if reasoning_content else None,
-                "details": details,
-                "timestamp": int(datetime.now().timestamp())
-            }
-            # Remove None values for cleaner output
-            structured_reasoning = {k: v for k, v in structured_reasoning.items() if v is not None}
-            delta["reasoning_content"] = structured_reasoning
-        else:
-            delta["reasoning_content"] = None
-
-        delta["tool_calls"] = None
+            message_parts = []
+            if stage:
+                message_parts.append(f"[{stage}]")
+            if status:
+                message_parts.append(f"({status})")
+            if progress is not None:
+                message_parts.append(f"{progress}%")
+            if reasoning_content:
+                message_parts.append(reasoning_content.strip())
+            
+            if message_parts:
+                delta["reasoning_content"] = " ".join(message_parts)
 
         response = {
             "id": chunk_id,
@@ -1262,18 +1250,9 @@ class GenerationHandler:
             "choices": [{
                 "index": 0,
                 "delta": delta,
-                "finish_reason": finish_reason,
-                "native_finish_reason": finish_reason
-            }],
-            "usage": {
-                "prompt_tokens": 0
-            }
+                "finish_reason": finish_reason
+            }]
         }
-
-        # Add completion tokens for final chunk
-        if finish_reason:
-            response["usage"]["completion_tokens"] = 1
-            response["usage"]["total_tokens"] = 1
 
         return f'data: {json.dumps(response, ensure_ascii=False)}\n\n'
 

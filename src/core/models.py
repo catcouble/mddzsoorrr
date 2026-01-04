@@ -8,6 +8,7 @@ class Token(BaseModel):
     id: Optional[int] = None
     token: str
     email: str
+    username: Optional[str] = ""  # Username from Sora API
     name: Optional[str] = ""
     st: Optional[str] = None
     rt: Optional[str] = None

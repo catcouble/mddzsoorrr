@@ -29,6 +29,16 @@ class _MySQLConnectionWrapper:
         sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "INT AUTO_INCREMENT PRIMARY KEY")
         sql = sql.replace("AUTOINCREMENT", "AUTO_INCREMENT")
         sql = sql.replace("INSERT OR IGNORE", "INSERT IGNORE")
+        # MySQL doesn't support DEFAULT on PRIMARY KEY, convert to just PRIMARY KEY
+        sql = sql.replace("INTEGER PRIMARY KEY DEFAULT 1", "INT PRIMARY KEY")
+        sql = sql.replace("INTEGER PRIMARY KEY DEFAULT", "INT PRIMARY KEY")
+        # Convert BOOLEAN to TINYINT(1) for MySQL compatibility
+        sql = sql.replace("BOOLEAN DEFAULT 0", "TINYINT(1) DEFAULT 0")
+        sql = sql.replace("BOOLEAN DEFAULT 1", "TINYINT(1) DEFAULT 1")
+        sql = sql.replace("BOOLEAN", "TINYINT(1)")
+        # MySQL TEXT type cannot have default value, convert to VARCHAR(255)
+        import re
+        sql = re.sub(r"TEXT DEFAULT '([^']*)'", r"VARCHAR(255) DEFAULT '\1'", sql)
         
         # Suppress MySQL warnings for CREATE TABLE IF NOT EXISTS, etc.
         with warnings.catch_warnings():
@@ -64,6 +74,10 @@ class _MySQLConnectionWrapper:
     @property
     def lastrowid(self):
         return self._cursor.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
 
 
 class Database:
@@ -102,6 +116,35 @@ class Database:
         else:
             # SQLite returns tuple
             return row[0]
+
+    def _get_row_value(self, row, key_or_index, default=None):
+        """Get value from row, handling both MySQL (dict) and SQLite (tuple/Row)
+        
+        Args:
+            row: Database row (dict for MySQL, tuple/Row for SQLite)
+            key_or_index: Column name (str) or index (int)
+            default: Default value if not found
+        """
+        if row is None:
+            return default
+        if isinstance(row, dict):
+            # MySQL returns dict
+            if isinstance(key_or_index, str):
+                return row.get(key_or_index, default)
+            else:
+                # If index provided, get by position
+                values = list(row.values())
+                return values[key_or_index] if key_or_index < len(values) else default
+        else:
+            # SQLite returns tuple or Row
+            if isinstance(key_or_index, int):
+                return row[key_or_index] if key_or_index < len(row) else default
+            else:
+                # Try to access by name (works for aiosqlite.Row)
+                try:
+                    return row[key_or_index]
+                except (KeyError, TypeError):
+                    return default
 
     def db_exists(self) -> bool:
         """Check if database file exists (SQLite only)"""
@@ -266,18 +309,20 @@ class Database:
             # Get proxy config from config_dict if provided, otherwise use defaults
             proxy_enabled = False
             proxy_url = None
+            proxy_pool_enabled = False
 
             if config_dict:
                 proxy_config = config_dict.get("proxy", {})
                 proxy_enabled = proxy_config.get("proxy_enabled", False)
                 proxy_url = proxy_config.get("proxy_url", "")
+                proxy_pool_enabled = proxy_config.get("proxy_pool_enabled", False)
                 # Convert empty string to None
                 proxy_url = proxy_url if proxy_url else None
 
             await db.execute("""
-                INSERT INTO proxy_config (id, proxy_enabled, proxy_url)
-                VALUES (1, ?, ?)
-            """, (proxy_enabled, proxy_url))
+                INSERT INTO proxy_config (id, proxy_enabled, proxy_url, proxy_pool_enabled)
+                VALUES (1, ?, ?, ?)
+            """, (proxy_enabled, proxy_url, proxy_pool_enabled))
 
         # Ensure watermark_free_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM watermark_free_config")
@@ -372,13 +417,23 @@ class Database:
 
                 if config_dict:
                     cloudflare_config = config_dict.get("cloudflare", {})
-                    solver_enabled = cloudflare_config.get("solver_enabled", False)
-                    solver_api_url = cloudflare_config.get("solver_api_url", "http://localhost:8000/v1/challenge")
+                    solver_enabled = cloudflare_config.get("solver_enabled", cloudflare_config.get("enabled", False))
+                    solver_api_url = cloudflare_config.get("solver_api_url", cloudflare_config.get("api_url", "http://localhost:8000/v1/challenge"))
 
                 await db.execute("""
                     INSERT INTO cloudflare_solver_config (id, solver_enabled, solver_api_url)
                     VALUES (1, ?, ?)
                 """, (solver_enabled, solver_api_url))
+
+        # Ensure webdav_config has a row
+        if await self._table_exists(db, "webdav_config"):
+            cursor = await db.execute("SELECT COUNT(*) FROM webdav_config")
+            count = await cursor.fetchone()
+            if self._get_count_value(count) == 0:
+                await db.execute("""
+                    INSERT INTO webdav_config (id, webdav_enabled, webdav_upload_path, auto_delete_enabled, auto_delete_days)
+                    VALUES (1, 0, '/video', 0, 30)
+                """)
 
 
     async def check_and_migrate_db(self, config_dict: dict = None):
@@ -386,7 +441,7 @@ class Database:
         
         使用版本号机制，只在版本变化时执行完整迁移检查
         """
-        CURRENT_DB_VERSION = 5  # 增加此版本号以触发迁移
+        CURRENT_DB_VERSION = 6  # 增加此版本号以触发迁移
         
         db = await self._get_connection()
         try:
@@ -405,7 +460,10 @@ class Database:
             # 获取当前版本
             cursor = await db.execute("SELECT version FROM db_version WHERE id = 1")
             row = await cursor.fetchone()
-            db_version = row[0] if row else 1
+            if row:
+                db_version = row["version"] if isinstance(row, dict) else row[0]
+            else:
+                db_version = 1
             
             # 如果版本相同，跳过迁移检查
             if db_version >= CURRENT_DB_VERSION:
@@ -640,6 +698,7 @@ class Database:
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     proxy_enabled BOOLEAN DEFAULT 0,
                     proxy_url TEXT,
+                    proxy_pool_enabled BOOLEAN DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -802,126 +861,14 @@ class Database:
 
         Args:
             config_dict: Configuration dictionary from setting.toml
-            is_first_startup: If True, only update if row doesn't exist. If False, always update.
+            is_first_startup: If True, only insert if row doesn't exist (preserve existing values).
+        
+        Note: This function only inserts default values if rows don't exist.
+        It never overwrites existing configuration to preserve user modifications.
         """
         async with self._connect() as db:
-            # On first startup, ensure all config rows exist with values from setting.toml
-            if is_first_startup:
-                await self._ensure_config_rows(db, config_dict)
-
-            # Initialize admin config
-            admin_config = config_dict.get("admin", {})
-            error_ban_threshold = admin_config.get("error_ban_threshold", 3)
-
-            # Get admin credentials from global config
-            global_config = config_dict.get("global", {})
-            admin_username = global_config.get("admin_username", "admin")
-            admin_password = global_config.get("admin_password", "admin")
-
-            if not is_first_startup:
-                # On upgrade, update the configuration
-                await db.execute("""
-                    UPDATE admin_config
-                    SET admin_username = ?, admin_password = ?, error_ban_threshold = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (admin_username, admin_password, error_ban_threshold))
-
-            # Initialize proxy config
-            proxy_config = config_dict.get("proxy", {})
-            proxy_enabled = proxy_config.get("proxy_enabled", False)
-            proxy_url = proxy_config.get("proxy_url", "")
-            # Convert empty string to None
-            proxy_url = proxy_url if proxy_url else None
-
-            if is_first_startup:
-                await db.execute("""
-                    INSERT OR IGNORE INTO proxy_config (id, proxy_enabled, proxy_url)
-                    VALUES (1, ?, ?)
-                """, (proxy_enabled, proxy_url))
-            else:
-                await db.execute("""
-                    UPDATE proxy_config
-                    SET proxy_enabled = ?, proxy_url = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (proxy_enabled, proxy_url))
-
-            # Initialize watermark-free config
-            watermark_config = config_dict.get("watermark_free", {})
-            watermark_free_enabled = watermark_config.get("watermark_free_enabled", False)
-            parse_method = watermark_config.get("parse_method", "third_party")
-            custom_parse_url = watermark_config.get("custom_parse_url", "")
-            custom_parse_token = watermark_config.get("custom_parse_token", "")
-
-            # Convert empty strings to None
-            custom_parse_url = custom_parse_url if custom_parse_url else None
-            custom_parse_token = custom_parse_token if custom_parse_token else None
-
-            if is_first_startup:
-                await db.execute("""
-                    INSERT OR IGNORE INTO watermark_free_config (id, watermark_free_enabled, parse_method, custom_parse_url, custom_parse_token)
-                    VALUES (1, ?, ?, ?, ?)
-                """, (watermark_free_enabled, parse_method, custom_parse_url, custom_parse_token))
-            else:
-                await db.execute("""
-                    UPDATE watermark_free_config
-                    SET watermark_free_enabled = ?, parse_method = ?, custom_parse_url = ?,
-                        custom_parse_token = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (watermark_free_enabled, parse_method, custom_parse_url, custom_parse_token))
-
-            # Initialize cache config
-            cache_config = config_dict.get("cache", {})
-            cache_enabled = cache_config.get("enabled", False)
-            cache_timeout = cache_config.get("timeout", 600)
-            cache_base_url = cache_config.get("base_url", "")
-            # Convert empty string to None
-            cache_base_url = cache_base_url if cache_base_url else None
-
-            if is_first_startup:
-                await db.execute("""
-                    INSERT OR IGNORE INTO cache_config (id, cache_enabled, cache_timeout, cache_base_url)
-                    VALUES (1, ?, ?, ?)
-                """, (cache_enabled, cache_timeout, cache_base_url))
-            else:
-                await db.execute("""
-                    UPDATE cache_config
-                    SET cache_enabled = ?, cache_timeout = ?, cache_base_url = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (cache_enabled, cache_timeout, cache_base_url))
-
-            # Initialize generation config
-            generation_config = config_dict.get("generation", {})
-            image_timeout = generation_config.get("image_timeout", 300)
-            video_timeout = generation_config.get("video_timeout", 1500)
-
-            if is_first_startup:
-                await db.execute("""
-                    INSERT OR IGNORE INTO generation_config (id, image_timeout, video_timeout)
-                    VALUES (1, ?, ?)
-                """, (image_timeout, video_timeout))
-            else:
-                await db.execute("""
-                    UPDATE generation_config
-                    SET image_timeout = ?, video_timeout = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (image_timeout, video_timeout))
-
-            # Initialize token refresh config
-            token_refresh_config = config_dict.get("token_refresh", {})
-            at_auto_refresh_enabled = token_refresh_config.get("at_auto_refresh_enabled", False)
-
-            if is_first_startup:
-                await db.execute("""
-                    INSERT OR IGNORE INTO token_refresh_config (id, at_auto_refresh_enabled)
-                    VALUES (1, ?)
-                """, (at_auto_refresh_enabled,))
-            else:
-                await db.execute("""
-                    UPDATE token_refresh_config
-                    SET at_auto_refresh_enabled = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (at_auto_refresh_enabled,))
-
+            # Ensure all config rows exist with values from setting.toml (only inserts if not exists)
+            await self._ensure_config_rows(db, config_dict)
             await db.commit()
 
     # Token operations
@@ -987,13 +934,23 @@ class Database:
         """Get all active tokens (enabled, not cooled down, not expired)"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("""
-                SELECT * FROM tokens
-                WHERE is_active = 1
-                AND (cooled_until IS NULL OR cooled_until < CURRENT_TIMESTAMP)
-                AND expiry_time > CURRENT_TIMESTAMP
-                ORDER BY last_used_at ASC NULLS FIRST
-            """)
+            # MySQL doesn't support NULLS FIRST, use COALESCE or CASE instead
+            if self.db_type == "mysql":
+                cursor = await db.execute("""
+                    SELECT * FROM tokens
+                    WHERE is_active = 1
+                    AND (cooled_until IS NULL OR cooled_until < CURRENT_TIMESTAMP)
+                    AND expiry_time > CURRENT_TIMESTAMP
+                    ORDER BY CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END, last_used_at ASC
+                """)
+            else:
+                cursor = await db.execute("""
+                    SELECT * FROM tokens
+                    WHERE is_active = 1
+                    AND (cooled_until IS NULL OR cooled_until < CURRENT_TIMESTAMP)
+                    AND expiry_time > CURRENT_TIMESTAMP
+                    ORDER BY last_used_at ASC NULLS FIRST
+                """)
             rows = await cursor.fetchall()
             return [Token(**dict(row)) for row in rows]
     
@@ -1158,6 +1115,50 @@ class Database:
             if row:
                 return TokenStats(**dict(row))
             return None
+
+    async def get_stats(self) -> dict:
+        """Get aggregated statistics across all tokens"""
+        from datetime import date
+        async with self._connect() as db:
+            today = str(date.today())
+            cursor = await db.execute("""
+                SELECT 
+                    SUM(image_count) as total_images,
+                    SUM(video_count) as total_videos,
+                    SUM(error_count) as total_errors,
+                    SUM(CASE WHEN today_date = ? THEN today_image_count ELSE 0 END) as today_images,
+                    SUM(CASE WHEN today_date = ? THEN today_video_count ELSE 0 END) as today_videos,
+                    SUM(CASE WHEN today_date = ? THEN today_error_count ELSE 0 END) as today_errors
+                FROM token_stats
+            """, (today, today, today))
+            row = await cursor.fetchone()
+            if row:
+                if isinstance(row, dict):
+                    return {
+                        "total_images": row.get("total_images") or 0,
+                        "total_videos": row.get("total_videos") or 0,
+                        "total_errors": row.get("total_errors") or 0,
+                        "today_images": row.get("today_images") or 0,
+                        "today_videos": row.get("today_videos") or 0,
+                        "today_errors": row.get("today_errors") or 0
+                    }
+                else:
+                    return {
+                        "total_images": row[0] or 0,
+                        "total_videos": row[1] or 0,
+                        "total_errors": row[2] or 0,
+                        "today_images": row[3] or 0,
+                        "today_videos": row[4] or 0,
+                        "today_errors": row[5] or 0
+                    }
+            return {
+                "total_images": 0,
+                "total_videos": 0,
+                "total_errors": 0,
+                "today_images": 0,
+                "today_videos": 0,
+                "today_errors": 0
+            }
     
     async def increment_image_count(self, token_id: int):
         """Increment image generation count"""
@@ -1167,9 +1168,10 @@ class Database:
             # Get current stats
             cursor = await db.execute("SELECT today_date FROM token_stats WHERE token_id = ?", (token_id,))
             row = await cursor.fetchone()
+            current_date = self._get_row_value(row, "today_date") or self._get_row_value(row, 0)
 
             # If date changed, reset today's count
-            if row and row[0] != today:
+            if row and current_date != today:
                 await db.execute("""
                     UPDATE token_stats
                     SET image_count = image_count + 1,
@@ -1196,9 +1198,10 @@ class Database:
             # Get current stats
             cursor = await db.execute("SELECT today_date FROM token_stats WHERE token_id = ?", (token_id,))
             row = await cursor.fetchone()
+            current_date = self._get_row_value(row, "today_date") or self._get_row_value(row, 0)
 
             # If date changed, reset today's count
-            if row and row[0] != today:
+            if row and current_date != today:
                 await db.execute("""
                     UPDATE token_stats
                     SET video_count = video_count + 1,
@@ -1225,9 +1228,10 @@ class Database:
             # Get current stats
             cursor = await db.execute("SELECT today_date FROM token_stats WHERE token_id = ?", (token_id,))
             row = await cursor.fetchone()
+            current_date = self._get_row_value(row, "today_date") or self._get_row_value(row, 0)
 
             # If date changed, reset today's error count
-            if row and row[0] != today:
+            if row and current_date != today:
                 await db.execute("""
                     UPDATE token_stats
                     SET error_count = error_count + 1,
@@ -1680,6 +1684,18 @@ class Database:
 
 
     # WebDAV config operations
+    async def ensure_webdav_config_row(self):
+        """Ensure webdav_config table has a row"""
+        async with self._connect() as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM webdav_config WHERE id = 1")
+            count = await cursor.fetchone()
+            if self._get_count_value(count) == 0:
+                await db.execute("""
+                    INSERT INTO webdav_config (id, webdav_enabled, webdav_upload_path, auto_delete_enabled, auto_delete_days)
+                    VALUES (1, 0, '/video', 0, 30)
+                """)
+                await db.commit()
+
     async def get_webdav_config(self) -> WebDAVConfig:
         """Get WebDAV configuration"""
         async with self._connect() as db:
@@ -1797,11 +1813,19 @@ class Database:
         """Get video records older than specified days for auto deletion"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("""
-                SELECT * FROM video_records 
-                WHERE status = 'uploaded' 
-                AND uploaded_at < datetime('now', ? || ' days')
-            """, (f"-{days}",))
+            # Use database-specific date arithmetic
+            if self.db_type == "mysql":
+                cursor = await db.execute("""
+                    SELECT * FROM video_records 
+                    WHERE status = 'uploaded' 
+                    AND uploaded_at < DATE_SUB(NOW(), INTERVAL ? DAY)
+                """, (days,))
+            else:
+                cursor = await db.execute("""
+                    SELECT * FROM video_records 
+                    WHERE status = 'uploaded' 
+                    AND uploaded_at < datetime('now', ? || ' days')
+                """, (f"-{days}",))
             rows = await cursor.fetchall()
             return [VideoRecord(**dict(row)) for row in rows]
 
@@ -1854,14 +1878,24 @@ class Database:
                 FROM video_records
             """)
             row = await cursor.fetchone()
-            return {
-                "total": row[0] or 0,
-                "uploaded": row[1] or 0,
-                "pending": row[2] or 0,
-                "failed": row[3] or 0,
-                "deleted": row[4] or 0,
-                "total_size": row[5] or 0
-            }
+            if isinstance(row, dict):
+                return {
+                    "total": row.get("total") or 0,
+                    "uploaded": row.get("uploaded") or 0,
+                    "pending": row.get("pending") or 0,
+                    "failed": row.get("failed") or 0,
+                    "deleted": row.get("deleted") or 0,
+                    "total_size": row.get("total_size") or 0
+                }
+            else:
+                return {
+                    "total": row[0] or 0,
+                    "uploaded": row[1] or 0,
+                    "pending": row[2] or 0,
+                    "failed": row[3] or 0,
+                    "deleted": row[4] or 0,
+                    "total_size": row[5] or 0
+                }
 
     # Upload log operations
     async def create_upload_log(self, log: UploadLog) -> int:
@@ -1896,15 +1930,3 @@ class Database:
         async with self._connect() as db:
             await db.execute("DELETE FROM upload_logs")
             await db.commit()
-
-    async def ensure_webdav_config_row(self):
-        """Ensure webdav_config table has a default row"""
-        async with self._connect() as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM webdav_config")
-            count = await cursor.fetchone()
-            if self._get_count_value(count) == 0:
-                await db.execute("""
-                    INSERT INTO webdav_config (id, webdav_enabled, webdav_upload_path, auto_delete_enabled, auto_delete_days)
-                    VALUES (1, 0, '/video', 0, 30)
-                """)
-                await db.commit()

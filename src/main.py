@@ -134,8 +134,9 @@ async def startup_event():
         await db.init_config_from_toml(config_dict, is_first_startup=True)
         print("✓ Database and configuration initialized successfully.")
     else:
-        # 跳过迁移检查，直接加载配置
-        pass
+        # 执行数据库迁移检查
+        await db.check_and_migrate_db(config_dict)
+        print("✓ Database migration check completed.")
 
     # Load admin credentials from database
     admin_config = await db.get_admin_config()

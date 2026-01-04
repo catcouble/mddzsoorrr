@@ -25,6 +25,8 @@ class SoraClient:
 
     def __init__(self, proxy_manager: ProxyManager):
         self.proxy_manager = proxy_manager
+        self.timeout = config.sora_timeout  # 从配置读取超时时间
+        self.base_url = config.sora_base_url  # 从配置读取基础URL
         # 持久化 session 字典，按 token 分组维护 cookie
         self._sessions: Dict[str, AsyncSession] = {}
 
