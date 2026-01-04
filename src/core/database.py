@@ -441,7 +441,7 @@ class Database:
         
         使用版本号机制，只在版本变化时执行完整迁移检查
         """
-        CURRENT_DB_VERSION = 6  # 增加此版本号以触发迁移
+        CURRENT_DB_VERSION = 7  # 增加此版本号以触发迁移
         
         db = await self._get_connection()
         try:
@@ -584,6 +584,28 @@ class Database:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_video_record_status ON video_records(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_upload_log_video_record_id ON upload_logs(video_record_id)")
         
+        # MySQL: 移除 tasks 表的外键约束，允许 token_id 为 NULL
+        if self.db_type == "mysql":
+            try:
+                # 先查找外键名称
+                cursor = await db.execute("""
+                    SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE 
+                    WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'tasks' 
+                    AND REFERENCED_TABLE_NAME = 'tokens'
+                """, (config.mysql_database,))
+                fk_row = await cursor.fetchone()
+                if fk_row:
+                    fk_name = fk_row["CONSTRAINT_NAME"] if isinstance(fk_row, dict) else fk_row[0]
+                    await db.execute(f"ALTER TABLE tasks DROP FOREIGN KEY {fk_name}")
+                    print(f"  ✓ Dropped foreign key {fk_name} from tasks table")
+                
+                # 修改 token_id 列允许 NULL
+                await db.execute("ALTER TABLE tasks MODIFY COLUMN token_id INTEGER NULL")
+                print(f"  ✓ Modified tasks.token_id to allow NULL")
+                await db.commit()
+            except Exception as e:
+                print(f"  ⚠️ Failed to modify tasks table: {e}")
+        
         # 确保配置行存在
         await self._ensure_config_rows(db, config_dict)
         
@@ -651,7 +673,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT UNIQUE NOT NULL,
-                    token_id INTEGER NOT NULL,
+                    token_id INTEGER,
                     model TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'processing',
@@ -659,8 +681,7 @@ class Database:
                     result_urls TEXT,
                     error_message TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    completed_at TIMESTAMP,
-                    FOREIGN KEY (token_id) REFERENCES tokens(id)
+                    completed_at TIMESTAMP
                 )
             """)
 

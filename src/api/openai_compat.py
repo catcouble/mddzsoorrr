@@ -619,7 +619,7 @@ async def create_video(
             # Create task in database
             task = Task(
                 task_id=video_id,
-                token_id=0,  # Will be set by generation handler
+                token_id=None,  # Will be set by generation handler
                 model=final_model,
                 prompt=prompt,
                 status="processing",

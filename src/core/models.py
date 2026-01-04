@@ -58,7 +58,7 @@ class Task(BaseModel):
     """Task model"""
     id: Optional[int] = None
     task_id: str
-    token_id: int
+    token_id: Optional[int] = None  # Can be None for async tasks before token assignment
     model: str
     prompt: str
     status: str = "processing"  # processing/completed/failed
