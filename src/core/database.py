@@ -1,4 +1,4 @@
-"""Database storage layer"""
+﻿"""Database storage layer"""
 import aiosqlite
 import asyncio
 import json
@@ -84,6 +84,17 @@ class Database:
             self.db_path = db_path
         
         self._write_lock = asyncio.Lock()  # 写操作锁
+
+    def _get_count_value(self, row) -> int:
+        """Get count value from row, handling both MySQL (dict) and SQLite (tuple)"""
+        if row is None:
+            return 0
+        if isinstance(row, dict):
+            # MySQL returns dict, get first value
+            return list(row.values())[0]
+        else:
+            # SQLite returns tuple
+            return row[0]
 
     def db_exists(self) -> bool:
         """Check if database file exists (SQLite only)"""
@@ -222,7 +233,7 @@ class Database:
         # Ensure admin_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM admin_config")
         count = await cursor.fetchone()
-        if count[0] == 0:
+        if self._get_count_value(count) == 0:
             # Get admin credentials from config_dict if provided, otherwise use defaults
             admin_username = "admin"
             admin_password = "admin"
@@ -244,7 +255,7 @@ class Database:
         # Ensure proxy_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM proxy_config")
         count = await cursor.fetchone()
-        if count[0] == 0:
+        if self._get_count_value(count) == 0:
             # Get proxy config from config_dict if provided, otherwise use defaults
             proxy_enabled = False
             proxy_url = None
@@ -264,7 +275,7 @@ class Database:
         # Ensure watermark_free_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM watermark_free_config")
         count = await cursor.fetchone()
-        if count[0] == 0:
+        if self._get_count_value(count) == 0:
             # Get watermark-free config from config_dict if provided, otherwise use defaults
             watermark_free_enabled = False
             parse_method = "third_party"
@@ -290,7 +301,7 @@ class Database:
         # Ensure cache_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM cache_config")
         count = await cursor.fetchone()
-        if count[0] == 0:
+        if self._get_count_value(count) == 0:
             # Get cache config from config_dict if provided, otherwise use defaults
             cache_enabled = False
             cache_timeout = 600
@@ -312,7 +323,7 @@ class Database:
         # Ensure generation_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM generation_config")
         count = await cursor.fetchone()
-        if count[0] == 0:
+        if self._get_count_value(count) == 0:
             # Get generation config from config_dict if provided, otherwise use defaults
             image_timeout = 300
             video_timeout = 1500
@@ -330,7 +341,7 @@ class Database:
         # Ensure token_refresh_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM token_refresh_config")
         count = await cursor.fetchone()
-        if count[0] == 0:
+        if self._get_count_value(count) == 0:
             # Get token refresh config from config_dict if provided, otherwise use defaults
             at_auto_refresh_enabled = False
 
@@ -347,7 +358,7 @@ class Database:
         if await self._table_exists(db, "cloudflare_solver_config"):
             cursor = await db.execute("SELECT COUNT(*) FROM cloudflare_solver_config")
             count = await cursor.fetchone()
-            if count[0] == 0:
+            if self._get_count_value(count) == 0:
                 # Get cloudflare solver config from config_dict if provided, otherwise use defaults
                 solver_enabled = False
                 solver_api_url = "http://localhost:8000/v1/challenge"
@@ -1550,7 +1561,7 @@ class Database:
         async with self._connect() as db:
             cursor = await db.execute("SELECT COUNT(*) FROM cloudflare_solver_config")
             count = await cursor.fetchone()
-            if count[0] == 0:
+            if self._get_count_value(count) == 0:
                 solver_enabled = False
                 solver_api_url = "http://localhost:8000/v1/challenge"
                 if config_dict:
@@ -1683,7 +1694,7 @@ class Database:
             cursor = await db.execute("SELECT COUNT(*) FROM webdav_config WHERE id = 1")
             count = await cursor.fetchone()
             
-            if count[0] == 0:
+            if self._get_count_value(count) == 0:
                 # Insert new row
                 await db.execute("""
                     INSERT INTO webdav_config (id, webdav_enabled, webdav_url, webdav_username, 
@@ -1884,7 +1895,7 @@ class Database:
         async with self._connect() as db:
             cursor = await db.execute("SELECT COUNT(*) FROM webdav_config")
             count = await cursor.fetchone()
-            if count[0] == 0:
+            if self._get_count_value(count) == 0:
                 await db.execute("""
                     INSERT INTO webdav_config (id, webdav_enabled, webdav_upload_path, auto_delete_enabled, auto_delete_days)
                     VALUES (1, 0, '/video', 0, 30)
