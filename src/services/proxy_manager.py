@@ -59,42 +59,48 @@ class ProxyManager:
         """Parse proxy line and convert to standard URL format
         
         Supported formats:
-        - http://user:pass@host:port
-        - https://user:pass@host:port
-        - socks5://user:pass@host:port
-        - socks5h://user:pass@host:port
-        - socks5://host:port:user:pass (协议://IP:端口:用户名:密码)
-        - st5 host:port:user:pass (st5简写格式)
-        - host:port (assumes http, no auth)
-        - host:port:user:pass (IP:端口:用户名:密码 format, assumes http)
+        - http://user:pass@host:port (标准HTTP格式)
+        - https://user:pass@host:port (标准HTTPS格式)
+        - socks5://user:pass@host:port (标准SOCKS5格式)
+        - socks5h://user:pass@host:port (标准SOCKS5H格式)
+        - socks5://host:port:user:pass (SOCKS5简化格式)
+        - st5 host:port:user:pass (ST5简写格式)
+        - host:port (无认证HTTP)
+        - host:port:user:pass (HTTP简化格式)
         """
         import re
         line = line.strip()
         if not line:
             return None
         
-        # Handle st5 prefix format: "st5 ip:port:user:pass" -> "socks5://user:pass@ip:port"
+        # 1. Handle st5 prefix format: "st5 ip:port:user:pass" -> "socks5://user:pass@ip:port"
         st5_match = re.match(r'^(?i)st5\s+(.+)$', line)
         if st5_match:
             rest = st5_match.group(1)
-            parts = rest.split(":")
-            if len(parts) >= 4:
-                host = parts[0]
-                port = parts[1]
-                user = parts[2]
-                password = ":".join(parts[3:])
-                if port.isdigit():
-                    return f"socks5://{user}:{password}@{host}:{port}"
+            # st5 格式可能带@或不带@
+            if "@" in rest:
+                # st5 user:pass@host:port -> socks5://user:pass@host:port
+                return f"socks5://{rest}"
+            else:
+                # st5 host:port:user:pass -> socks5://user:pass@host:port
+                parts = rest.split(":")
+                if len(parts) >= 4:
+                    host = parts[0]
+                    port = parts[1]
+                    user = parts[2]
+                    password = ":".join(parts[3:])
+                    if port.isdigit():
+                        return f"socks5://{user}:{password}@{host}:{port}"
             print(f"⚠️ Invalid st5 proxy format: {line}")
             return None
         
-        # Check if it's a URL format with protocol
+        # 2. Check if it's a URL format with protocol
         if line.startswith(("http://", "https://", "socks5://", "socks5h://")):
-            # Check if it's already in standard format (has @)
+            # Already in standard format with @ (user:pass@host:port)
             if "@" in line:
                 return line
             
-            # Handle format: protocol://host:port:user:pass
+            # Handle simplified format: protocol://host:port:user:pass
             # e.g., socks5://38.134.216.107:13611:helX01iJa8:jbMXPCMoja
             try:
                 protocol_end = line.index("://") + 3
@@ -103,11 +109,11 @@ class ProxyManager:
                 
                 parts = rest.split(":")
                 if len(parts) >= 4:
+                    # host:port:user:pass format
                     host = parts[0]
                     port = parts[1]
                     user = parts[2]
-                    # Password might contain colons, join remaining parts
-                    password = ":".join(parts[3:])
+                    password = ":".join(parts[3:])  # Password might contain colons
                     if port.isdigit():
                         return f"{protocol}{user}:{password}@{host}:{port}"
                 elif len(parts) == 2:
@@ -118,10 +124,17 @@ class ProxyManager:
             
             return line
         
+        # 3. No protocol prefix - determine format by structure
+        
+        # Check if it has @ (user:pass@host:port without protocol)
+        if "@" in line:
+            # Assume http:// for bare user:pass@host:port
+            return f"http://{line}"
+        
         # Count colons to determine format
         colon_count = line.count(":")
         
-        # Format: host:port (exactly 1 colon)
+        # Format: host:port (exactly 1 colon, no auth)
         if colon_count == 1:
             host, port = line.split(":")
             if port.isdigit():
@@ -130,15 +143,13 @@ class ProxyManager:
             return None
         
         # Format: host:port:user:pass (3+ colons)
-        # Split from the right to handle passwords with colons
         if colon_count >= 3:
             parts = line.split(":")
             if len(parts) >= 4:
                 host = parts[0]
                 port = parts[1]
                 user = parts[2]
-                # Password might contain colons, join remaining parts
-                password = ":".join(parts[3:])
+                password = ":".join(parts[3:])  # Password might contain colons
                 if port.isdigit():
                     return f"http://{user}:{password}@{host}:{port}"
         

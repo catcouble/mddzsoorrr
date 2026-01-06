@@ -5,6 +5,7 @@ import base64
 import time
 import random
 import re
+import sys
 from dataclasses import dataclass
 from typing import Optional, AsyncGenerator, Dict, Any
 from datetime import datetime
@@ -649,12 +650,25 @@ class GenerationHandler:
                 if task_data and task_data.status == "completed":
                     generation_completed = True
                     debug_logger.log_info(f"Client disconnected but task {task_id} was completed")
+                    # Update log immediately since finally block may not execute properly during GeneratorExit
+                    try:
+                        duration = time.time() - start_time
+                        await self._log_request_complete(
+                            log_id,
+                            {"task_id": task_id, "status": "success"},
+                            200,
+                            duration
+                        )
+                        await self.token_manager.record_success(token_obj.id, is_video=is_video)
+                    except Exception as log_error:
+                        debug_logger.log_info(f"Failed to update log during GeneratorExit: {log_error}")
                 else:
                     debug_logger.log_info(f"Client disconnected, task {task_id} status: {task_data.status if task_data else 'unknown'}")
                 raise
             finally:
                 # Always update log and stats when generation completes successfully
-                if generation_completed:
+                # Skip if already updated in GeneratorExit handler
+                if generation_completed and not isinstance(sys.exc_info()[1], GeneratorExit):
                     # Record success
                     await self.token_manager.record_success(token_obj.id, is_video=is_video)
                     
