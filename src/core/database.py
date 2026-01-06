@@ -1518,25 +1518,46 @@ class Database:
     # Task operations
     async def create_task(self, task: Task) -> int:
         """Create a new task"""
-        async with self._connect() as db:
-            cursor = await db.execute("""
-                INSERT INTO tasks (task_id, token_id, model, prompt, status, progress)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (task.task_id, task.token_id, task.model, task.prompt, task.status, task.progress))
-            await db.commit()
-            return cursor.lastrowid
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with self._connect() as db:
+                    cursor = await db.execute("""
+                        INSERT INTO tasks (task_id, token_id, model, prompt, status, progress)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (task.task_id, task.token_id, task.model, task.prompt, task.status, task.progress))
+                    await db.commit()
+                    return cursor.lastrowid
+            except Exception as e:
+                error_msg = str(e)
+                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                        continue
+                raise
     
     async def update_task(self, task_id: str, status: str, progress: float, 
                          result_urls: Optional[str] = None, error_message: Optional[str] = None):
         """Update task status"""
-        async with self._connect() as db:
-            completed_at = datetime.now() if status in ["completed", "failed"] else None
-            await db.execute("""
-                UPDATE tasks 
-                SET status = ?, progress = ?, result_urls = ?, error_message = ?, completed_at = ?
-                WHERE task_id = ?
-            """, (status, progress, result_urls, error_message, completed_at, task_id))
-            await db.commit()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with self._connect() as db:
+                    completed_at = datetime.now() if status in ["completed", "failed"] else None
+                    await db.execute("""
+                        UPDATE tasks 
+                        SET status = ?, progress = ?, result_urls = ?, error_message = ?, completed_at = ?
+                        WHERE task_id = ?
+                    """, (status, progress, result_urls, error_message, completed_at, task_id))
+                    await db.commit()
+                    return
+            except Exception as e:
+                error_msg = str(e)
+                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                        continue
+                raise
     
     async def get_task(self, task_id: str) -> Optional[Task]:
         """Get task by ID"""
@@ -1561,74 +1582,106 @@ class Database:
     # Request log operations
     async def log_request(self, log: RequestLog) -> int:
         """Log a request and return log ID"""
-        async with self._connect() as db:
-            cursor = await db.execute("""
-                INSERT INTO request_logs (token_id, task_id, operation, request_body, response_body, status_code, duration)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (log.token_id, log.task_id, log.operation, log.request_body, log.response_body,
-                  log.status_code, log.duration))
-            await db.commit()
-            return cursor.lastrowid
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with self._connect() as db:
+                    cursor = await db.execute("""
+                        INSERT INTO request_logs (token_id, task_id, operation, request_body, response_body, status_code, duration)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (log.token_id, log.task_id, log.operation, log.request_body, log.response_body,
+                          log.status_code, log.duration))
+                    await db.commit()
+                    return cursor.lastrowid
+            except Exception as e:
+                error_msg = str(e)
+                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                        continue
+                raise
 
     async def update_request_log(self, log_id: int, response_body: Optional[str] = None,
                                  status_code: Optional[int] = None, duration: Optional[float] = None):
         """Update request log with completion data"""
-        async with self._connect() as db:
-            updates = []
-            params = []
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with self._connect() as db:
+                    updates = []
+                    params = []
 
-            if response_body is not None:
-                updates.append("response_body = ?")
-                params.append(response_body)
-            if status_code is not None:
-                updates.append("status_code = ?")
-                params.append(status_code)
-            if duration is not None:
-                updates.append("duration = ?")
-                params.append(duration)
+                    if response_body is not None:
+                        updates.append("response_body = ?")
+                        params.append(response_body)
+                    if status_code is not None:
+                        updates.append("status_code = ?")
+                        params.append(status_code)
+                    if duration is not None:
+                        updates.append("duration = ?")
+                        params.append(duration)
 
-            if updates:
-                updates.append("updated_at = CURRENT_TIMESTAMP")
-                params.append(log_id)
-                query = f"UPDATE request_logs SET {', '.join(updates)} WHERE id = ?"
-                await db.execute(query, params)
-                await db.commit()
+                    if updates:
+                        updates.append("updated_at = CURRENT_TIMESTAMP")
+                        params.append(log_id)
+                        query = f"UPDATE request_logs SET {', '.join(updates)} WHERE id = ?"
+                        await db.execute(query, params)
+                        await db.commit()
+                return
+            except Exception as e:
+                error_msg = str(e)
+                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                        continue
+                raise
 
     async def update_request_log_by_task_id(self, task_id: str, response_body: Optional[str] = None,
                                             status_code: Optional[int] = None, duration: Optional[float] = None):
         """Update latest in-progress request log for a task"""
-        async with self._connect() as db:
-            updates = []
-            params = []
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with self._connect() as db:
+                    updates = []
+                    params = []
 
-            if response_body is not None:
-                updates.append("response_body = ?")
-                params.append(response_body)
-            if status_code is not None:
-                updates.append("status_code = ?")
-                params.append(status_code)
-            if duration is not None:
-                updates.append("duration = ?")
-                params.append(duration)
+                    if response_body is not None:
+                        updates.append("response_body = ?")
+                        params.append(response_body)
+                    if status_code is not None:
+                        updates.append("status_code = ?")
+                        params.append(status_code)
+                    if duration is not None:
+                        updates.append("duration = ?")
+                        params.append(duration)
 
-            if updates:
-                updates.append("updated_at = CURRENT_TIMESTAMP")
-                params.append(task_id)
-                query = f"""
-                    UPDATE request_logs
-                    SET {', '.join(updates)}
-                    WHERE id = (
-                        SELECT id FROM (
-                            SELECT id
-                            FROM request_logs
-                            WHERE task_id = ? AND status_code = -1
-                            ORDER BY id DESC
-                            LIMIT 1
-                        ) AS sub
-                    )
-                """
-                await db.execute(query, params)
-                await db.commit()
+                    if updates:
+                        updates.append("updated_at = CURRENT_TIMESTAMP")
+                        params.append(task_id)
+                        query = f"""
+                            UPDATE request_logs
+                            SET {', '.join(updates)}
+                            WHERE id = (
+                                SELECT id FROM (
+                                    SELECT id
+                                    FROM request_logs
+                                    WHERE task_id = ? AND status_code = -1
+                                    ORDER BY id DESC
+                                    LIMIT 1
+                                ) AS sub
+                            )
+                        """
+                        await db.execute(query, params)
+                        await db.commit()
+                return
+            except Exception as e:
+                error_msg = str(e)
+                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                        continue
+                raise
 
     async def get_recent_logs(self, limit: int = 100) -> List[dict]:
         """Get recent logs with token email and task progress"""
