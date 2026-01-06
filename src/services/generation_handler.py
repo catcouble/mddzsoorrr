@@ -684,6 +684,43 @@ class GenerationHandler:
                     if is_video and self.concurrency_manager:
                         await self.concurrency_manager.release_video(token_obj.id)
                 raise
+            except asyncio.CancelledError:
+                # Client disconnected/cancelled request (async cancellation)
+                task_data = await self.db.get_task(task_id)
+                if task_data and task_data.status == "completed":
+                    generation_completed = True
+                    debug_logger.log_info(f"Request cancelled but task {task_id} was completed")
+                    try:
+                        duration = time.time() - start_time
+                        await self._log_request_complete(
+                            log_id,
+                            {"task_id": task_id, "status": "success"},
+                            200,
+                            duration
+                        )
+                        await self.token_manager.record_success(token_obj.id, is_video=is_video)
+                    except Exception as log_error:
+                        debug_logger.log_info(f"Failed to update log during cancellation: {log_error}")
+                else:
+                    debug_logger.log_info(f"Request cancelled, task {task_id} status: {task_data.status if task_data else 'unknown'}")
+                    try:
+                        await self.db.update_task(task_id, "cancelled", 0, error_message="Client disconnected")
+                        await self.db.update_request_log_by_task_id(
+                            task_id,
+                            response_body=json.dumps({"error": "Client disconnected"}),
+                            status_code=499,
+                            duration=time.time() - start_time
+                        )
+                    except Exception as log_error:
+                        debug_logger.log_info(f"Failed to update cancellation state: {log_error}")
+
+                    if is_image:
+                        await self.load_balancer.token_lock.release_lock(token_obj.id)
+                        if self.concurrency_manager:
+                            await self.concurrency_manager.release_image(token_obj.id)
+                    if is_video and self.concurrency_manager:
+                        await self.concurrency_manager.release_video(token_obj.id)
+                raise
             finally:
                 # Always update log and stats when generation completes successfully
                 # Skip if already updated in GeneratorExit handler

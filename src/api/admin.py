@@ -1213,6 +1213,8 @@ async def get_logs(limit: int = 100, token: str = Depends(verify_admin_token)):
             if task:
                 log_data["progress"] = task.progress
                 log_data["task_status"] = task.status
+                if task.status == "cancelled":
+                    log_data["status_code"] = 499
 
         result.append(log_data)
 
