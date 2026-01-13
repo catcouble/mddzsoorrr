@@ -838,6 +838,9 @@ class GenerationHandler:
         last_status_output_time = start_time  # Track last status output time for video generation
         video_status_interval = 30  # Output status every 30 seconds for video generation
         post_link_emitted = False
+        draft_url_missing_count = 0
+        draft_pending_last_emit = start_time
+        draft_pending_emit_interval = 30
 
         debug_logger.log_info(f"Starting task polling: task_id={task_id}, is_video={is_video}, timeout={timeout}s, adaptive_polling={'enabled' if is_video else 'disabled'}")
 
@@ -903,6 +906,7 @@ class GenerationHandler:
                     for task in pending_tasks:
                         if task.get("id") == task_id:
                             task_found = True
+                            draft_url_missing_count = 0
                             # Update progress
                             progress_pct = task.get("progress_pct")
                             # Handle null progress at the beginning
@@ -954,6 +958,7 @@ class GenerationHandler:
                         items = result.get("items", [])
 
                         # Find matching task in drafts
+                        draft_pending = False
                         for item in items:
                             if item.get("task_id") == task_id:
                                 # Check for content violation
@@ -985,11 +990,10 @@ class GenerationHandler:
                                 debug_logger.log_info(f"Found task {task_id} in drafts with kind: {kind}, reason_str: {reason_str}, has_url: {bool(url)}")
 
                                 # Check if content violates policy
-                                # Violation indicators: kind is violation type, or has reason_str, or missing video URL
+                                # Violation indicators: kind is violation type, or has reason_str
                                 is_violation = (
                                     kind == "sora_content_violation" or
-                                    (reason_str and reason_str.strip()) or  # Has non-empty reason
-                                    not url  # No video URL means generation failed
+                                    (reason_str and reason_str.strip())  # Has non-empty reason
                                 )
 
                                 if is_violation:
@@ -1034,6 +1038,24 @@ class GenerationHandler:
 
                                     # Stop polling immediately
                                     return
+                                
+                                if not url:
+                                    draft_url_missing_count += 1
+                                    debug_logger.log_info(
+                                        f"Draft found for task {task_id} but video URL not ready yet (count={draft_url_missing_count}); continuing polling"
+                                    )
+                                    if stream:
+                                        current_time = time.time()
+                                        if current_time - draft_pending_last_emit >= draft_pending_emit_interval:
+                                            draft_pending_last_emit = current_time
+                                            yield self._format_stream_chunk(
+                                                reasoning_content="Draft found, video file is still being prepared...",
+                                                stage="generation",
+                                                status="processing",
+                                                details={"task_status": "draft_pending"}
+                                            )
+                                    draft_pending = True
+                                    break
 
                                 # Check if watermark-free mode is enabled
                                 watermark_free_config = await self.db.get_watermark_free_config()
@@ -1243,9 +1265,11 @@ class GenerationHandler:
                                             permalink=permalink
                                         ),
                                         finish_reason="STOP"
-                                    )
+                                )
                                     yield "data: [DONE]\n\n"
                                 return
+                        if draft_pending:
+                            continue
                 else:
                     result = await self.sora_client.get_image_tasks(token)
                     task_responses = result.get("task_responses", [])
