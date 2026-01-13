@@ -728,12 +728,23 @@ async def _poll_lambda_task_result(task_id: str, token_obj, prompt: str,
         )
     except Exception as e:
         duration = time.time() - start_time
-        await generation_handler.db.update_request_log_by_task_id(
-            task_id,
-            response_body=json.dumps({"error": str(e)}),
-            status_code=500,
-            duration=duration
-        )
+        try:
+            if log_id is not None:
+                await generation_handler.db.update_request_log(
+                    log_id,
+                    response_body=json.dumps({"error": str(e)}),
+                    status_code=500,
+                    duration=duration
+                )
+            else:
+                await generation_handler.db.update_request_log_by_task_id(
+                    task_id,
+                    response_body=json.dumps({"error": str(e)}),
+                    status_code=500,
+                    duration=duration
+                )
+        except Exception as log_error:
+            print(f"Warning: failed to update request log for task {task_id}: {log_error}")
     finally:
         if generation_handler.concurrency_manager:
             await generation_handler.concurrency_manager.release_video(token_obj.id)
@@ -744,15 +755,11 @@ async def _lambda_video_generation_stream(prompt: str, image_data: Optional[str]
     """Generate video using Lambda with URL polling"""
     from ..services.lambda_manager import lambda_manager
     
-    token_obj = await generation_handler.load_balancer.select_token(for_video_generation=True)
-    if not token_obj:
-        raise HTTPException(status_code=400, detail="No available tokens for video generation")
-
-    concurrency_acquired = True
-    if generation_handler.concurrency_manager:
-        concurrency_acquired = await generation_handler.concurrency_manager.acquire_video(token_obj.id)
-        if not concurrency_acquired:
-            raise HTTPException(status_code=400, detail="Token concurrency limit reached for video generation")
+    token_obj = None
+    try:
+        token_obj = await generation_handler._acquire_token_for_generation(is_image=False, is_video=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     start_time = time.time()
     task_id = None
@@ -865,7 +872,7 @@ async def _lambda_video_generation_stream(prompt: str, image_data: Optional[str]
             )
         raise
     finally:
-        if concurrency_acquired and generation_handler.concurrency_manager:
+        if token_obj and generation_handler.concurrency_manager:
             await generation_handler.concurrency_manager.release_video(token_obj.id)
 
 @router.post("/v1/videos", status_code=200)
@@ -1008,15 +1015,11 @@ async def create_video(
             )
 
             if can_use_lambda:
-                token_obj = await generation_handler.load_balancer.select_token(for_video_generation=True)
-                if not token_obj:
-                    raise HTTPException(status_code=400, detail="No available tokens for video generation")
-
-                concurrency_acquired = True
-                if generation_handler.concurrency_manager:
-                    concurrency_acquired = await generation_handler.concurrency_manager.acquire_video(token_obj.id)
-                    if not concurrency_acquired:
-                        raise HTTPException(status_code=400, detail="Token concurrency limit reached for video generation")
+                token_obj = None
+                try:
+                    token_obj = await generation_handler._acquire_token_for_generation(is_image=False, is_video=True)
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=str(e))
 
                 start_time = time.time()
                 try:
@@ -1076,11 +1079,11 @@ async def create_video(
                         }
                     )
                 except HTTPException:
-                    if concurrency_acquired and generation_handler.concurrency_manager:
+                    if token_obj and generation_handler.concurrency_manager:
                         await generation_handler.concurrency_manager.release_video(token_obj.id)
                     raise
                 except Exception as e:
-                    if concurrency_acquired and generation_handler.concurrency_manager:
+                    if token_obj and generation_handler.concurrency_manager:
                         await generation_handler.concurrency_manager.release_video(token_obj.id)
                     raise HTTPException(status_code=500, detail=f"Lambda create failed: {str(e)}")
         

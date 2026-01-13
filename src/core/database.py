@@ -59,6 +59,10 @@ class _MySQLConnectionWrapper:
         await self._conn.commit()
     
     async def close(self):
+        try:
+            await self._conn.rollback()
+        except Exception:
+            pass
         await self._cursor.close()
         if self._pool:
             self._pool.release(self._conn)
@@ -180,7 +184,14 @@ class Database:
             pool = await self._get_mysql_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
-                    yield _MySQLConnectionWrapper(conn, cursor)
+                    wrapper = _MySQLConnectionWrapper(conn, cursor)
+                    try:
+                        yield wrapper
+                    finally:
+                        try:
+                            await conn.rollback()
+                        except Exception:
+                            pass
         else:
             pool = get_pool()
             if pool:
@@ -281,6 +292,118 @@ class Database:
                 return any(col[1] == column_name for col in columns)
         except Exception:
             return False
+
+    def _should_retry_mysql_error(self, error: Exception) -> bool:
+        error_msg = str(error).lower()
+        return (
+            "record has changed" in error_msg
+            or "deadlock" in error_msg
+            or "lock wait timeout" in error_msg
+            or "1205" in error_msg
+            or "1213" in error_msg
+            or "1020" in error_msg
+        )
+
+    async def _index_exists(self, db, table_name: str, index_name: str) -> bool:
+        if self.db_type == "mysql":
+            cursor = await db.execute(
+                "SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND INDEX_NAME = %s LIMIT 1",
+                (config.mysql_database, table_name, index_name)
+            )
+            result = await cursor.fetchone()
+            return result is not None
+        cursor = await db.execute(f"PRAGMA index_list({table_name})")
+        rows = await cursor.fetchall()
+        for row in rows:
+            if row[1] == index_name:
+                return True
+        return False
+
+    async def _dedupe_token_stats(self, db) -> bool:
+        if not await self._table_exists(db, "token_stats"):
+            return False
+        cursor = await db.execute("""
+            SELECT token_id, COUNT(*) AS cnt
+            FROM token_stats
+            GROUP BY token_id
+            HAVING cnt > 1
+        """)
+        rows = await cursor.fetchall()
+        if not rows:
+            return False
+
+        await db.execute("DROP TABLE IF EXISTS token_stats_dedup")
+        await db.execute("""
+            CREATE TEMPORARY TABLE token_stats_dedup AS
+            SELECT
+                ts.token_id,
+                SUM(ts.image_count) AS image_count,
+                SUM(ts.video_count) AS video_count,
+                SUM(ts.error_count) AS error_count,
+                MAX(ts.last_error_at) AS last_error_at,
+                md.max_today_date AS today_date,
+                SUM(CASE
+                        WHEN ts.today_date = md.max_today_date
+                             OR (ts.today_date IS NULL AND md.max_today_date IS NULL)
+                        THEN ts.today_image_count ELSE 0 END) AS today_image_count,
+                SUM(CASE
+                        WHEN ts.today_date = md.max_today_date
+                             OR (ts.today_date IS NULL AND md.max_today_date IS NULL)
+                        THEN ts.today_video_count ELSE 0 END) AS today_video_count,
+                SUM(CASE
+                        WHEN ts.today_date = md.max_today_date
+                             OR (ts.today_date IS NULL AND md.max_today_date IS NULL)
+                        THEN ts.today_error_count ELSE 0 END) AS today_error_count,
+                MAX(ts.consecutive_error_count) AS consecutive_error_count
+            FROM token_stats ts
+            JOIN (
+                SELECT token_id, MAX(today_date) AS max_today_date
+                FROM token_stats
+                GROUP BY token_id
+            ) md ON md.token_id = ts.token_id
+            GROUP BY ts.token_id, md.max_today_date
+        """)
+
+        await db.execute("DELETE FROM token_stats")
+        await db.execute("""
+            INSERT INTO token_stats (
+                token_id,
+                image_count,
+                video_count,
+                error_count,
+                last_error_at,
+                today_image_count,
+                today_video_count,
+                today_error_count,
+                today_date,
+                consecutive_error_count
+            )
+            SELECT
+                token_id,
+                image_count,
+                video_count,
+                error_count,
+                last_error_at,
+                today_image_count,
+                today_video_count,
+                today_error_count,
+                today_date,
+                consecutive_error_count
+            FROM token_stats_dedup
+        """)
+        await db.execute("DROP TABLE token_stats_dedup")
+        return True
+
+    async def _ensure_token_stats_unique_index(self, db):
+        if not await self._table_exists(db, "token_stats"):
+            return
+        await self._dedupe_token_stats(db)
+        if await self._index_exists(db, "token_stats", "idx_token_stats_token_id"):
+            return
+        try:
+            await db.execute("CREATE UNIQUE INDEX idx_token_stats_token_id ON token_stats(token_id)")
+        except Exception as e:
+            print(f"  ⚠️ Failed to create token_stats unique index: {e}")
 
     async def _ensure_config_rows(self, db, config_dict: dict = None):
         """Ensure all config tables have their default rows
@@ -473,7 +596,7 @@ class Database:
         
         使用版本号机制，只在版本变化时执行完整迁移检查
         """
-        CURRENT_DB_VERSION = 9  # 增加此版本号以触发迁移
+        CURRENT_DB_VERSION = 11  # 增加此版本号以触发迁移
         
         db = await self._get_connection()
         try:
@@ -500,6 +623,8 @@ class Database:
             # 如果版本相同，跳过迁移检查
             if db_version >= CURRENT_DB_VERSION:
                 await self._ensure_config_rows(db, config_dict)
+                await self._ensure_token_stats_unique_index(db)
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_task_status_id ON request_logs(task_id, status_code, id)")
                 await db.commit()
                 return
             
@@ -532,6 +657,11 @@ class Database:
             ("tokens", "video_concurrency", "INTEGER DEFAULT -1"),
             ("tokens", "client_id", "TEXT"),
             ("tokens", "proxy_url", "TEXT"),
+            ("token_stats", "last_error_at", "TIMESTAMP"),
+            ("token_stats", "today_image_count", "INTEGER DEFAULT 0"),
+            ("token_stats", "today_video_count", "INTEGER DEFAULT 0"),
+            ("token_stats", "today_error_count", "INTEGER DEFAULT 0"),
+            ("token_stats", "today_date", "DATE"),
             ("token_stats", "consecutive_error_count", "INTEGER DEFAULT 0"),
             ("admin_config", "admin_username", "TEXT DEFAULT 'admin'"),
             ("admin_config", "admin_password", "TEXT DEFAULT 'admin'"),
@@ -628,6 +758,7 @@ class Database:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_token_email ON tokens(email)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_task_status_created ON request_logs(task_id, status_code, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_task_status_id ON request_logs(task_id, status_code, id)")
         
         # MySQL: 移除 tasks 表的外键约束，允许 token_id 为 NULL
         if self.db_type == "mysql":
@@ -650,6 +781,8 @@ class Database:
                 await db.commit()
             except Exception as e:
                 print(f"  ⚠️ Failed to modify tasks table: {e}")
+
+        await self._ensure_token_stats_unique_index(db)
         
         # 确保配置行存在
         await self._ensure_config_rows(db, config_dict)
@@ -921,6 +1054,7 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_upload_log_video_record_id ON upload_logs(video_record_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_task_status_created ON request_logs(task_id, status_code, created_at)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_task_status_id ON request_logs(task_id, status_code, id)")
 
             # Migration: Add daily statistics columns if they don't exist
             if not await self._column_exists(db, "token_stats", "today_image_count"):
@@ -931,6 +1065,8 @@ class Database:
                 await db.execute("ALTER TABLE token_stats ADD COLUMN today_error_count INTEGER DEFAULT 0")
             if not await self._column_exists(db, "token_stats", "today_date"):
                 await db.execute("ALTER TABLE token_stats ADD COLUMN today_date DATE")
+
+            await self._ensure_token_stats_unique_index(db)
 
             await db.commit()
         finally:
@@ -974,9 +1110,7 @@ class Database:
             token_id = cursor.lastrowid
 
             # Create stats entry
-            await db.execute("""
-                INSERT INTO token_stats (token_id) VALUES (?)
-            """, (token_id,))
+            await db.execute("INSERT OR IGNORE INTO token_stats (token_id) VALUES (?)", (token_id,))
             await db.commit()
 
             return token_id
@@ -1045,7 +1179,7 @@ class Database:
     
     async def update_token_usage(self, token_id: int):
         """Update token usage"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1057,17 +1191,15 @@ class Database:
                     await db.commit()
                     return
             except Exception as e:
-                error_msg = str(e)
-                # MySQL/TiDB optimistic lock conflict
-                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
     
     async def update_token_status(self, token_id: int, is_active: bool):
         """Update token status with retry for concurrent updates"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1077,18 +1209,16 @@ class Database:
                     await db.commit()
                     return
             except Exception as e:
-                error_msg = str(e)
-                # MySQL error 1020: Record has changed since last read
-                if "1020" in error_msg or "Record has changed" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
     
     async def update_token_sora2(self, token_id: int, supported: bool, invite_code: Optional[str] = None,
                                 redeemed_count: int = 0, total_count: int = 0, remaining_count: int = 0):
         """Update token Sora2 support info with retry for concurrent updates"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1100,17 +1230,15 @@ class Database:
                     await db.commit()
                     return
             except Exception as e:
-                error_msg = str(e)
-                # MySQL error 1020: Record has changed since last read
-                if "1020" in error_msg or "Record has changed" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
 
     async def update_token_sora2_remaining(self, token_id: int, remaining_count: int):
         """Update token Sora2 remaining count with retry for concurrent updates"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1120,17 +1248,15 @@ class Database:
                     await db.commit()
                     return
             except Exception as e:
-                error_msg = str(e)
-                # MySQL error 1020: Record has changed since last read
-                if "1020" in error_msg or "Record has changed" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
 
     async def update_token_sora2_cooldown(self, token_id: int, cooldown_until: Optional[datetime]):
         """Update token Sora2 cooldown time with retry for concurrent updates"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1140,21 +1266,29 @@ class Database:
                     await db.commit()
                     return
             except Exception as e:
-                error_msg = str(e)
-                # MySQL error 1020: Record has changed since last read
-                if "1020" in error_msg or "Record has changed" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
 
     async def update_token_cooldown(self, token_id: int, cooled_until: datetime):
         """Update token cooldown"""
-        async with self._connect() as db:
-            await db.execute("""
-                UPDATE tokens SET cooled_until = ? WHERE id = ?
-            """, (cooled_until, token_id))
-            await db.commit()
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                async with self._connect() as db:
+                    await db.execute("""
+                        UPDATE tokens SET cooled_until = ? WHERE id = ?
+                    """, (cooled_until, token_id))
+                    await db.commit()
+                    return
+            except Exception as e:
+                if self._should_retry_mysql_error(e):
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.2 * (attempt + 1))
+                        continue
+                raise
     
     async def delete_token(self, token_id: int):
         """Delete token"""
@@ -1285,24 +1419,19 @@ class Database:
     async def ensure_token_stats_row(self, token_id: int):
         """Ensure a stats row exists for a token (safe for SQLite/MySQL)"""
         async with self._connect() as db:
-            await db.execute("""
-                INSERT INTO token_stats (token_id)
-                SELECT ?
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM token_stats WHERE token_id = ?
-                )
-            """, (token_id, token_id))
+            await db.execute(
+                "INSERT OR IGNORE INTO token_stats (token_id) VALUES (?)",
+                (token_id,)
+            )
             await db.commit()
 
     async def ensure_token_stats_rows(self):
         """Ensure stats rows exist for all tokens"""
         async with self._connect() as db:
             await db.execute("""
-                INSERT INTO token_stats (token_id)
+                INSERT OR IGNORE INTO token_stats (token_id)
                 SELECT t.id
                 FROM tokens t
-                LEFT JOIN token_stats s ON s.token_id = t.id
-                WHERE s.token_id IS NULL
             """)
             await db.commit()
 
@@ -1413,57 +1542,35 @@ class Database:
             return {"chat_inflight": 0, "video_inflight": 0}
     
     async def increment_image_count(self, token_id: int):
-        """Increment image generation count - uses row-level lock for MySQL"""
+        """Increment image generation count - uses upsert for MySQL"""
         from datetime import date
         today = str(date.today())
         
         if self.db_type == "mysql":
-            max_retries = 3
+            max_retries = 5
             for attempt in range(max_retries):
                 try:
-                    # MySQL: use SELECT FOR UPDATE to lock the row, then update
-                    import aiomysql
-                    pool = await self._get_mysql_pool()
-                    async with pool.acquire() as conn:
-                        async with conn.cursor() as cursor:
-                            # Lock the row first
-                            await cursor.execute(
-                                "SELECT id FROM token_stats WHERE token_id = %s FOR UPDATE",
-                                (token_id,)
-                            )
-                            row = await cursor.fetchone()
-                            if not row:
-                                await cursor.execute(
-                                    "INSERT INTO token_stats (token_id) VALUES (%s)",
-                                    (token_id,)
-                                )
-                            # Now update atomically
-                            await cursor.execute("""
-                                UPDATE token_stats
-                                SET image_count = image_count + 1,
-                                    today_image_count = IF(today_date = %s, today_image_count + 1, 1),
-                                    today_date = %s
-                                WHERE token_id = %s
-                            """, (today, today, token_id))
-                            await conn.commit()
-                            return
+                    async with self._connect() as db:
+                        await db.execute("""
+                            INSERT INTO token_stats (token_id, image_count, today_image_count, today_date)
+                            VALUES (?, 1, 1, ?)
+                            ON DUPLICATE KEY UPDATE
+                                image_count = image_count + 1,
+                                today_image_count = IF(today_date = VALUES(today_date), today_image_count + 1, 1),
+                                today_date = VALUES(today_date)
+                        """, (token_id, today))
+                        await db.commit()
+                        return
                 except Exception as e:
-                    error_msg = str(e)
-                    if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                    if self._should_retry_mysql_error(e):
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(0.1 * (attempt + 1))
+                            await asyncio.sleep(0.2 * (attempt + 1))
                             continue
                     raise
         else:
             # SQLite: simple atomic update
             async with self._connect() as db:
-                await db.execute("""
-                    INSERT INTO token_stats (token_id)
-                    SELECT ?
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM token_stats WHERE token_id = ?
-                    )
-                """, (token_id, token_id))
+                await db.execute("INSERT OR IGNORE INTO token_stats (token_id) VALUES (?)", (token_id,))
                 await db.execute("""
                     UPDATE token_stats
                     SET image_count = image_count + 1,
@@ -1474,57 +1581,35 @@ class Database:
                 await db.commit()
 
     async def increment_video_count(self, token_id: int):
-        """Increment video generation count - uses row-level lock for MySQL"""
+        """Increment video generation count - uses upsert for MySQL"""
         from datetime import date
         today = str(date.today())
         
         if self.db_type == "mysql":
-            max_retries = 3
+            max_retries = 5
             for attempt in range(max_retries):
                 try:
-                    # MySQL: use SELECT FOR UPDATE to lock the row, then update
-                    import aiomysql
-                    pool = await self._get_mysql_pool()
-                    async with pool.acquire() as conn:
-                        async with conn.cursor() as cursor:
-                            # Lock the row first
-                            await cursor.execute(
-                                "SELECT id FROM token_stats WHERE token_id = %s FOR UPDATE",
-                                (token_id,)
-                            )
-                            row = await cursor.fetchone()
-                            if not row:
-                                await cursor.execute(
-                                    "INSERT INTO token_stats (token_id) VALUES (%s)",
-                                    (token_id,)
-                                )
-                            # Now update atomically
-                            await cursor.execute("""
-                                UPDATE token_stats
-                                SET video_count = video_count + 1,
-                                    today_video_count = IF(today_date = %s, today_video_count + 1, 1),
-                                    today_date = %s
-                                WHERE token_id = %s
-                            """, (today, today, token_id))
-                            await conn.commit()
-                            return
+                    async with self._connect() as db:
+                        await db.execute("""
+                            INSERT INTO token_stats (token_id, video_count, today_video_count, today_date)
+                            VALUES (?, 1, 1, ?)
+                            ON DUPLICATE KEY UPDATE
+                                video_count = video_count + 1,
+                                today_video_count = IF(today_date = VALUES(today_date), today_video_count + 1, 1),
+                                today_date = VALUES(today_date)
+                        """, (token_id, today))
+                        await db.commit()
+                        return
                 except Exception as e:
-                    error_msg = str(e)
-                    if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                    if self._should_retry_mysql_error(e):
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(0.1 * (attempt + 1))
+                            await asyncio.sleep(0.2 * (attempt + 1))
                             continue
                     raise
         else:
             # SQLite: simple atomic update
             async with self._connect() as db:
-                await db.execute("""
-                    INSERT INTO token_stats (token_id)
-                    SELECT ?
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM token_stats WHERE token_id = ?
-                    )
-                """, (token_id, token_id))
+                await db.execute("INSERT OR IGNORE INTO token_stats (token_id) VALUES (?)", (token_id,))
                 await db.execute("""
                     UPDATE token_stats
                     SET video_count = video_count + 1,
@@ -1535,59 +1620,44 @@ class Database:
                 await db.commit()
     
     async def increment_error_count(self, token_id: int):
-        """Increment error count - uses row-level lock for MySQL"""
+        """Increment error count - uses upsert for MySQL"""
         from datetime import date
         today = str(date.today())
         
         if self.db_type == "mysql":
-            max_retries = 3
+            max_retries = 5
             for attempt in range(max_retries):
                 try:
-                    # MySQL: use SELECT FOR UPDATE to lock the row, then update
-                    import aiomysql
-                    pool = await self._get_mysql_pool()
-                    async with pool.acquire() as conn:
-                        async with conn.cursor() as cursor:
-                            # Lock the row first
-                            await cursor.execute(
-                                "SELECT id FROM token_stats WHERE token_id = %s FOR UPDATE",
-                                (token_id,)
+                    async with self._connect() as db:
+                        await db.execute("""
+                            INSERT INTO token_stats (
+                                token_id,
+                                error_count,
+                                consecutive_error_count,
+                                today_error_count,
+                                today_date,
+                                last_error_at
                             )
-                            row = await cursor.fetchone()
-                            if not row:
-                                await cursor.execute(
-                                    "INSERT INTO token_stats (token_id) VALUES (%s)",
-                                    (token_id,)
-                                )
-                            # Now update atomically
-                            await cursor.execute("""
-                                UPDATE token_stats
-                                SET error_count = error_count + 1,
-                                    consecutive_error_count = consecutive_error_count + 1,
-                                    today_error_count = IF(today_date = %s, today_error_count + 1, 1),
-                                    today_date = %s,
-                                    last_error_at = CURRENT_TIMESTAMP
-                                WHERE token_id = %s
-                            """, (today, today, token_id))
-                            await conn.commit()
-                            return
+                            VALUES (?, 1, 1, 1, ?, CURRENT_TIMESTAMP)
+                            ON DUPLICATE KEY UPDATE
+                                error_count = error_count + 1,
+                                consecutive_error_count = consecutive_error_count + 1,
+                                today_error_count = IF(today_date = VALUES(today_date), today_error_count + 1, 1),
+                                today_date = VALUES(today_date),
+                                last_error_at = CURRENT_TIMESTAMP
+                        """, (token_id, today))
+                        await db.commit()
+                        return
                 except Exception as e:
-                    error_msg = str(e)
-                    if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                    if self._should_retry_mysql_error(e):
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(0.1 * (attempt + 1))
+                            await asyncio.sleep(0.2 * (attempt + 1))
                             continue
                     raise
         else:
             # SQLite: simple atomic update
             async with self._connect() as db:
-                await db.execute("""
-                    INSERT INTO token_stats (token_id)
-                    SELECT ?
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM token_stats WHERE token_id = ?
-                    )
-                """, (token_id, token_id))
+                await db.execute("INSERT OR IGNORE INTO token_stats (token_id) VALUES (?)", (token_id,))
                 await db.execute("""
                     UPDATE token_stats
                     SET error_count = error_count + 1,
@@ -1600,33 +1670,23 @@ class Database:
                 await db.commit()
     
     async def reset_error_count(self, token_id: int):
-        """Reset consecutive error count - uses row-level lock for MySQL"""
+        """Reset consecutive error count - uses upsert for MySQL"""
         if self.db_type == "mysql":
-            max_retries = 3
+            max_retries = 5
             for attempt in range(max_retries):
                 try:
-                    # MySQL: use SELECT FOR UPDATE to lock the row, then update
-                    import aiomysql
-                    pool = await self._get_mysql_pool()
-                    async with pool.acquire() as conn:
-                        async with conn.cursor() as cursor:
-                            # Lock the row first
-                            await cursor.execute(
-                                "SELECT id FROM token_stats WHERE token_id = %s FOR UPDATE",
-                                (token_id,)
-                            )
-                            # Now update atomically
-                            await cursor.execute(
-                                "UPDATE token_stats SET consecutive_error_count = 0 WHERE token_id = %s",
-                                (token_id,)
-                            )
-                            await conn.commit()
-                            return
+                    async with self._connect() as db:
+                        await db.execute("""
+                            INSERT INTO token_stats (token_id, consecutive_error_count)
+                            VALUES (?, 0)
+                            ON DUPLICATE KEY UPDATE consecutive_error_count = 0
+                        """, (token_id,))
+                        await db.commit()
+                        return
                 except Exception as e:
-                    error_msg = str(e)
-                    if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                    if self._should_retry_mysql_error(e):
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(0.1 * (attempt + 1))
+                            await asyncio.sleep(0.2 * (attempt + 1))
                             continue
                     raise
         else:
@@ -1640,7 +1700,7 @@ class Database:
     # Task operations
     async def create_task(self, task: Task) -> int:
         """Create a new task"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1651,17 +1711,16 @@ class Database:
                     await db.commit()
                     return cursor.lastrowid
             except Exception as e:
-                error_msg = str(e)
-                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
     
     async def update_task(self, task_id: str, status: str, progress: float, 
                          result_urls: Optional[str] = None, error_message: Optional[str] = None):
         """Update task status"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1674,10 +1733,9 @@ class Database:
                     await db.commit()
                     return
             except Exception as e:
-                error_msg = str(e)
-                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
     
@@ -1704,7 +1762,7 @@ class Database:
     # Request log operations
     async def log_request(self, log: RequestLog) -> int:
         """Log a request and return log ID"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1716,17 +1774,16 @@ class Database:
                     await db.commit()
                     return cursor.lastrowid
             except Exception as e:
-                error_msg = str(e)
-                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
 
     async def update_request_log(self, log_id: int, response_body: Optional[str] = None,
                                  status_code: Optional[int] = None, duration: Optional[float] = None):
         """Update request log with completion data"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1751,17 +1808,16 @@ class Database:
                         await db.commit()
                 return
             except Exception as e:
-                error_msg = str(e)
-                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
 
     async def update_request_log_by_task_id(self, task_id: str, response_body: Optional[str] = None,
                                             status_code: Optional[int] = None, duration: Optional[float] = None):
         """Update latest in-progress request log for a task"""
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1780,28 +1836,36 @@ class Database:
 
                     if updates:
                         updates.append("updated_at = CURRENT_TIMESTAMP")
-                        params.append(task_id)
-                        query = f"""
-                            UPDATE request_logs
-                            SET {', '.join(updates)}
-                            WHERE id = (
-                                SELECT id FROM (
-                                    SELECT id
-                                    FROM request_logs
-                                    WHERE task_id = ? AND status_code = -1
-                                    ORDER BY id DESC
-                                    LIMIT 1
-                                ) AS sub
-                            )
-                        """
+                        if self.db_type == "mysql":
+                            cursor = await db.execute("""
+                                SELECT id
+                                FROM request_logs
+                                WHERE task_id = ? AND status_code = -1
+                                ORDER BY id DESC
+                                LIMIT 1
+                                FOR UPDATE
+                            """, (task_id,))
+                        else:
+                            cursor = await db.execute("""
+                                SELECT id
+                                FROM request_logs
+                                WHERE task_id = ? AND status_code = -1
+                                ORDER BY id DESC
+                                LIMIT 1
+                            """, (task_id,))
+                        row = await cursor.fetchone()
+                        if not row:
+                            return
+                        log_id = row["id"] if isinstance(row, dict) else row[0]
+                        params.append(log_id)
+                        query = f"UPDATE request_logs SET {', '.join(updates)} WHERE id = ?"
                         await db.execute(query, params)
                         await db.commit()
                 return
             except Exception as e:
-                error_msg = str(e)
-                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
 
@@ -1874,7 +1938,7 @@ class Database:
         
         Uses INSERT ... ON CONFLICT for SQLite or INSERT ... ON DUPLICATE KEY UPDATE for MySQL/TiDB
         """
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 async with self._connect() as db:
@@ -1899,12 +1963,11 @@ class Database:
                     await db.commit()
                     return
             except Exception as e:
-                error_msg = str(e)
                 # Handle TiDB/MySQL optimistic lock conflict (error 1020)
-                if "1020" in error_msg or "Record has changed" in error_msg or "Deadlock" in error_msg:
+                if self._should_retry_mysql_error(e):
                     if attempt < max_retries - 1:
                         import asyncio
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
                         continue
                 raise
 

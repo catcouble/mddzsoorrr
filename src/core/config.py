@@ -309,7 +309,7 @@ class Config:
     @property
     def mysql_pool_size(self) -> int:
         """Get MySQL connection pool size"""
-        return self._config.get("database", {}).get("mysql_pool_size", 10)
+        return self._config.get("database", {}).get("mysql_pool_size", 50)
 
     # ==================== Redis Configuration ====================
     

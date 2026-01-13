@@ -429,6 +429,47 @@ class GenerationHandler:
         token_obj = await self.load_balancer.select_token(for_image_generation=is_image, for_video_generation=is_video)
         return token_obj is not None
 
+    async def _acquire_token_for_generation(self, is_image: bool, is_video: bool, max_attempts: int = 5):
+        """Select a token and acquire required locks/concurrency with retry."""
+        if is_image:
+            no_token_msg = "No available tokens for image generation. All tokens are either disabled, cooling down, locked, or expired."
+        else:
+            no_token_msg = "No available tokens for video generation. All tokens are either disabled, cooling down, Sora2 quota exhausted, don't support Sora2, or expired."
+
+        last_error = None
+        for attempt in range(max_attempts):
+            token_obj = await self.load_balancer.select_token(for_image_generation=is_image, for_video_generation=is_video)
+            if not token_obj:
+                last_error = no_token_msg
+                await asyncio.sleep(0.05 * (attempt + 1) + random.uniform(0.0, 0.05))
+                continue
+
+            if is_image:
+                lock_acquired = await self.load_balancer.token_lock.acquire_lock(token_obj.id)
+                if not lock_acquired:
+                    last_error = f"Failed to acquire lock for token {token_obj.id}"
+                    await asyncio.sleep(0.05 * (attempt + 1) + random.uniform(0.0, 0.05))
+                    continue
+
+                if self.concurrency_manager:
+                    concurrency_acquired = await self.concurrency_manager.acquire_image(token_obj.id)
+                    if not concurrency_acquired:
+                        await self.load_balancer.token_lock.release_lock(token_obj.id)
+                        last_error = f"Token concurrency limit reached for token {token_obj.id}"
+                        await asyncio.sleep(0.05 * (attempt + 1) + random.uniform(0.0, 0.05))
+                        continue
+
+            if is_video and self.concurrency_manager:
+                concurrency_acquired = await self.concurrency_manager.acquire_video(token_obj.id)
+                if not concurrency_acquired:
+                    last_error = f"Token concurrency limit reached for token {token_obj.id}"
+                    await asyncio.sleep(0.05 * (attempt + 1) + random.uniform(0.0, 0.05))
+                    continue
+
+            return token_obj
+
+        raise Exception(last_error or no_token_msg)
+
     async def handle_generation(self, model: str, prompt: str,
                                image: Optional[str] = None,
                                video: Optional[str] = None,
@@ -502,32 +543,7 @@ class GenerationHandler:
                     return
 
         # Streaming mode: proceed with actual generation
-        # Select token (with lock for image generation, Sora2 quota check for video generation)
-        token_obj = await self.load_balancer.select_token(for_image_generation=is_image, for_video_generation=is_video)
-        if not token_obj:
-            if is_image:
-                raise Exception("No available tokens for image generation. All tokens are either disabled, cooling down, locked, or expired.")
-            else:
-                raise Exception("No available tokens for video generation. All tokens are either disabled, cooling down, Sora2 quota exhausted, don't support Sora2, or expired.")
-
-        # Acquire lock for image generation
-        if is_image:
-            lock_acquired = await self.load_balancer.token_lock.acquire_lock(token_obj.id)
-            if not lock_acquired:
-                raise Exception(f"Failed to acquire lock for token {token_obj.id}")
-
-            # Acquire concurrency slot for image generation
-            if self.concurrency_manager:
-                concurrency_acquired = await self.concurrency_manager.acquire_image(token_obj.id)
-                if not concurrency_acquired:
-                    await self.load_balancer.token_lock.release_lock(token_obj.id)
-                    raise Exception(f"Failed to acquire concurrency slot for token {token_obj.id}")
-
-        # Acquire concurrency slot for video generation
-        if is_video and self.concurrency_manager:
-            concurrency_acquired = await self.concurrency_manager.acquire_video(token_obj.id)
-            if not concurrency_acquired:
-                raise Exception(f"Failed to acquire concurrency slot for token {token_obj.id}")
+        token_obj = await self._acquire_token_for_generation(is_image=is_image, is_video=is_video)
 
         task_id = None
         log_id = None  # Log ID for updating later
@@ -1683,9 +1699,10 @@ class GenerationHandler:
             model_config: Model configuration
             character_options: Optional custom character creation options
         """
-        token_obj = await self.load_balancer.select_token(for_video_generation=True)
-        if not token_obj:
-            raise Exception("No available tokens for character creation")
+        try:
+            token_obj = await self._acquire_token_for_generation(is_image=False, is_video=True)
+        except Exception as e:
+            raise Exception(f"No available tokens for character creation: {e}")
 
         try:
             yield self._format_stream_chunk(
@@ -1844,6 +1861,9 @@ class GenerationHandler:
                 response_text=str(e)
             )
             raise
+        finally:
+            if token_obj and self.concurrency_manager:
+                await self.concurrency_manager.release_video(token_obj.id)
 
     async def _handle_character_and_video_generation(self, video_data, prompt: str, model_config: Dict,
                                                       character_options: Optional[CharacterOptions] = None) -> AsyncGenerator[str, None]:
@@ -1866,9 +1886,10 @@ class GenerationHandler:
             model_config: Model configuration
             character_options: Optional custom character creation options
         """
-        token_obj = await self.load_balancer.select_token(for_video_generation=True)
-        if not token_obj:
-            raise Exception("No available tokens for video generation")
+        try:
+            token_obj = await self._acquire_token_for_generation(is_image=False, is_video=True)
+        except Exception as e:
+            raise Exception(f"No available tokens for video generation: {e}")
 
         character_id = None
         try:
@@ -2073,9 +2094,10 @@ class GenerationHandler:
         4. Poll for results
         5. Return video result
         """
-        token_obj = await self.load_balancer.select_token(for_video_generation=True)
-        if not token_obj:
-            raise Exception("No available tokens for remix generation")
+        try:
+            token_obj = await self._acquire_token_for_generation(is_image=False, is_video=True)
+        except Exception as e:
+            raise Exception(f"No available tokens for remix generation: {e}")
 
         task_id = None
         try:

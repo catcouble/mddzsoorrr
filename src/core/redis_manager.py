@@ -199,6 +199,15 @@ class RedisManager:
                 del self._local_cache[key]
                 return True
             return False
+
+    async def expire(self, key: str, ex: int) -> bool:
+        """Set expiry for a key"""
+        if self._client:
+            return await self._client.expire(key, ex) > 0
+        if key in self._local_cache:
+            asyncio.create_task(self._auto_expire_local_cache(key, ex))
+            return True
+        return False
     
     async def exists(self, key: str) -> bool:
         """Check if a key exists"""
