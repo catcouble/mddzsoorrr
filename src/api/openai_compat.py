@@ -239,21 +239,44 @@ async def create_chat_completion(
 
         # Handle streaming
         if request.stream:
+            use_lambda = False
+            lambda_url = None
+            lambda_key = None
+            if is_video_model and not video_data and not remix_target_id:
+                if not generation_handler.sora_client.is_storyboard_prompt(prompt):
+                    from ..core.database import Database
+                    db = Database()
+                    lambda_config = await db.get_lambda_config()
+                    use_lambda = bool(lambda_config.lambda_enabled and lambda_config.lambda_api_url and lambda_config.lambda_api_key)
+                    lambda_url = lambda_config.lambda_api_url
+                    lambda_key = lambda_config.lambda_api_key
+
             async def generate():
                 has_error = False
                 error_message = None
                 next_task = None
                 disconnect_task = None
                 try:
-                    gen = generation_handler.handle_generation(
-                        model=request.model,
-                        prompt=prompt,
-                        image=image_data,
-                        video=video_data,
-                        remix_target_id=remix_target_id,
-                        stream=True,
-                        style_id=request.style_id
-                    )
+                    if use_lambda:
+                        gen = _lambda_video_generation_stream(
+                            prompt=prompt,
+                            image_data=image_data,
+                            style_id=request.style_id,
+                            model_id=request.model,
+                            model_config=model_config,
+                            lambda_url=lambda_url,
+                            lambda_key=lambda_key
+                        )
+                    else:
+                        gen = generation_handler.handle_generation(
+                            model=request.model,
+                            prompt=prompt,
+                            image=image_data,
+                            video=video_data,
+                            remix_target_id=remix_target_id,
+                            stream=True,
+                            style_id=request.style_id
+                        )
                     next_task = asyncio.create_task(gen.__anext__())
                     disconnect_task = asyncio.create_task(http_request.is_disconnected())
                     while True:
@@ -723,6 +746,135 @@ async def _poll_lambda_task_result(task_id: str, token_obj, prompt: str,
         if generation_handler.concurrency_manager:
             await generation_handler.concurrency_manager.release_video(token_obj.id)
 
+
+async def _lambda_video_generation_stream(prompt: str, image_data: Optional[str], style_id: Optional[str],
+                                          model_id: str, model_config: dict,
+                                          lambda_url: str, lambda_key: Optional[str]):
+    token_obj = await generation_handler.load_balancer.select_token(for_video_generation=True)
+    if not token_obj:
+        raise HTTPException(status_code=400, detail="No available tokens for video generation")
+
+    concurrency_acquired = True
+    if generation_handler.concurrency_manager:
+        concurrency_acquired = await generation_handler.concurrency_manager.acquire_video(token_obj.id)
+        if not concurrency_acquired:
+            raise HTTPException(status_code=400, detail="Token concurrency limit reached for video generation")
+
+    start_time = time.time()
+    task_id = None
+    log_id = None
+
+    try:
+        yield generation_handler._format_stream_chunk(
+            reasoning_content="Initializing generation request...",
+            stage="generation",
+            status="started",
+            is_first=True
+        )
+
+        media_id = None
+        if image_data:
+            yield generation_handler._format_stream_chunk(
+                reasoning_content="Uploading image to server...",
+                stage="upload",
+                status="started"
+            )
+            image_bytes = generation_handler._decode_base64_image(image_data)
+            media_id = await generation_handler.sora_client.upload_image(image_bytes, token_obj.token)
+            yield generation_handler._format_stream_chunk(
+                reasoning_content="Image uploaded successfully. Proceeding to generation...",
+                stage="upload",
+                status="completed"
+            )
+
+        n_frames = model_config.get("n_frames", 300)
+        payload = _build_nf_create_payload(
+            prompt=prompt,
+            orientation=model_config.get("orientation", "landscape"),
+            n_frames=n_frames,
+            media_id=media_id,
+            style_id=style_id,
+            model=model_config.get("model", "sy_8"),
+            size=model_config.get("size", "small")
+        )
+
+        task_id = await _post_lambda_create_task(
+            lambda_url=lambda_url,
+            lambda_key=lambda_key,
+            token=token_obj.token,
+            payload=payload
+        )
+
+        from ..core.models import Task
+        task = Task(
+            task_id=task_id,
+            token_id=token_obj.id,
+            model=model_id,
+            prompt=prompt,
+            status="processing",
+            progress=0.0
+        )
+        await generation_handler.db.create_task(task)
+
+        log_id = await generation_handler._log_request_start(
+            token_obj.id,
+            task_id,
+            "generate_video",
+            {"model": model_id, "prompt": prompt, "has_image": image_data is not None, "via_lambda": True}
+        )
+        await generation_handler.token_manager.record_usage(token_obj.id, is_video=True)
+
+        async for chunk in generation_handler._poll_task_result(
+            task_id=task_id,
+            token=token_obj.token,
+            is_video=True,
+            stream=True,
+            prompt=prompt,
+            token_id=token_obj.id,
+            release_video_slot=False
+        ):
+            yield chunk
+
+        duration = time.time() - start_time
+        await generation_handler.token_manager.record_success(token_obj.id, is_video=True)
+        await generation_handler._log_request_complete(
+            log_id,
+            {"task_id": task_id, "status": "success"},
+            200,
+            duration
+        )
+    except (asyncio.CancelledError, GeneratorExit):
+        if task_id:
+            await generation_handler.db.update_task(task_id, "cancelled", 0, error_message="Client disconnected")
+            await generation_handler.db.update_request_log_by_task_id(
+                task_id,
+                response_body=json.dumps({"error": "Client disconnected"}),
+                status_code=499,
+                duration=time.time() - start_time
+            )
+        raise
+    except Exception as e:
+        duration = time.time() - start_time
+        if task_id:
+            await generation_handler.db.update_task(task_id, "failed", 0, error_message=str(e))
+            await generation_handler.db.update_request_log_by_task_id(
+                task_id,
+                response_body=json.dumps({"error": str(e)}),
+                status_code=500,
+                duration=duration
+            )
+        elif log_id:
+            await generation_handler._log_request_complete(
+                log_id,
+                {"error": str(e)},
+                500,
+                duration
+            )
+        raise
+    finally:
+        if concurrency_acquired and generation_handler.concurrency_manager:
+            await generation_handler.concurrency_manager.release_video(token_obj.id)
+
 @router.post("/v1/videos", status_code=200)
 async def create_video(
     request: Request,
@@ -858,6 +1010,7 @@ async def create_video(
             can_use_lambda = (
                 lambda_config.lambda_enabled
                 and lambda_config.lambda_api_url
+                and lambda_config.lambda_api_key
                 and not remix_target_id
                 and not generation_handler.sora_client.is_storyboard_prompt(prompt)
             )
