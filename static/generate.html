@@ -1605,6 +1605,27 @@
             </div>
           </div>
 
+          <div id="characterOptions" class="collapse-box" style="margin-top:4px; display:none;">
+            <div class="section-title" style="margin-bottom:6px;">角色卡自定义</div>
+            <div class="row" style="margin-top:4px;">
+              <div>
+                <label class="section-title" for="characterDisplayName" style="margin-bottom:4px;">角色卡名称</label>
+                <input id="characterDisplayName" class="input" type="text" placeholder="例：星际航行的露西">
+              </div>
+              <div>
+                <label class="section-title" for="characterUsername" style="margin-bottom:4px;">角色卡用户名（可选）</label>
+                <input id="characterUsername" class="input" type="text" placeholder="例：lucy_space（不含 @）">
+              </div>
+            </div>
+            <div class="row" style="margin-top:6px;">
+              <div>
+                <label class="section-title" for="characterTimestamps" style="margin-bottom:4px;">时间戳（可选）</label>
+                <input id="characterTimestamps" class="input" type="text" placeholder="例：0,3 或 1,5">
+                <div class="hint">留空则默认使用 0,3。</div>
+              </div>
+            </div>
+          </div>
+
           <div id="promptBlock">
             <label class="section-title" for="prompt" style="margin-bottom:4px;">提示词（支持拖拽角色卡）</label>
             <textarea id="prompt" placeholder="英文更稳定，可写动作/时长/镜头等" style="min-height:170px; max-width: 1120px;"></textarea>
@@ -1844,6 +1865,135 @@
     </div>
     <div id="toastHost" class="toast-host" aria-live="polite" aria-label="提示"></div>
 <script src="/static/js/generate.js?v=20251214b"></script>
+  <script>
+    (function() {
+      const ids = {
+        container: "characterOptions",
+        displayName: "characterDisplayName",
+        username: "characterUsername",
+        timestamps: "characterTimestamps"
+      };
+
+      const isCharacterMode = () => {
+        const selected = document.querySelector('input[name="batchType"]:checked');
+        return selected && selected.value === "character";
+      };
+
+      const toggleCharacterOptions = () => {
+        const container = document.getElementById(ids.container);
+        if (!container) {
+          return;
+        }
+        container.style.display = isCharacterMode() ? "block" : "none";
+      };
+
+      const readCharacterOptions = () => {
+        if (!isCharacterMode()) {
+          return null;
+        }
+        const displayName = document.getElementById(ids.displayName)?.value?.trim();
+        const username = document.getElementById(ids.username)?.value?.trim();
+        const timestamps = document.getElementById(ids.timestamps)?.value?.trim();
+        const options = {};
+        if (displayName) {
+          options.display_name = displayName;
+        }
+        if (username) {
+          options.username = username;
+        }
+        if (timestamps) {
+          options.timestamps = timestamps;
+        }
+        return Object.keys(options).length ? options : null;
+      };
+
+      const mergeIntoFormData = (formData, options) => {
+        if (!options) {
+          return;
+        }
+        if (options.display_name && !formData.has("display_name")) {
+          formData.set("display_name", options.display_name);
+        }
+        if (options.username && !formData.has("username")) {
+          formData.set("username", options.username);
+        }
+        if (options.timestamps && !formData.has("timestamps")) {
+          formData.set("timestamps", options.timestamps);
+        }
+      };
+
+      const mergeIntoJson = (payload, options) => {
+        if (!options) {
+          return payload;
+        }
+        const next = { ...payload };
+        if (options.display_name && !("display_name" in next)) {
+          next.display_name = options.display_name;
+        }
+        if (options.username && !("username" in next)) {
+          next.username = options.username;
+        }
+        if (options.timestamps && !("timestamps" in next)) {
+          next.timestamps = options.timestamps;
+        }
+        return next;
+      };
+
+      const patchFetch = () => {
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (input, init = {}) => {
+          const url = typeof input === "string" ? input : input?.url;
+          if (!url || !url.includes("/v1/characters")) {
+            return originalFetch(input, init);
+          }
+
+          const method = (init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+          if (method !== "POST") {
+            return originalFetch(input, init);
+          }
+
+          const options = readCharacterOptions();
+          if (!options) {
+            return originalFetch(input, init);
+          }
+
+          const nextInit = { ...init };
+          const body = nextInit.body;
+          if (body instanceof FormData) {
+            mergeIntoFormData(body, options);
+            nextInit.body = body;
+            return originalFetch(input, nextInit);
+          }
+
+          if (typeof body === "string") {
+            try {
+              const parsed = JSON.parse(body);
+              const merged = mergeIntoJson(parsed, options);
+              nextInit.body = JSON.stringify(merged);
+              const headers = new Headers(nextInit.headers || (input instanceof Request ? input.headers : undefined));
+              if (!headers.has("Content-Type")) {
+                headers.set("Content-Type", "application/json");
+              }
+              nextInit.headers = headers;
+              return originalFetch(input, nextInit);
+            } catch (error) {
+              return originalFetch(input, init);
+            }
+          }
+
+          return originalFetch(input, init);
+        };
+      };
+
+      window.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll('input[name="batchType"]').forEach((radio) => {
+          radio.addEventListener("change", toggleCharacterOptions);
+        });
+        toggleCharacterOptions();
+        patchFetch();
+      });
+    })();
+  </script>
   <script>
     (function() {
       const postHeight = () => {

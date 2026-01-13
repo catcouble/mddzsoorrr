@@ -121,6 +121,16 @@ curl -X GET "http://your-server/v1/models" \
 | `style_id` | string | 否 | 视频风格 |
 | `character_options` | object | 否 | 角色创建选项 |
 
+**character_options 对象字段:**
+
+| 字段 | 类型 | 必填 | 描述 |
+|------|------|------|------|
+| `timestamps` | string | 否 | 视频时间戳，如 `0,3`；留空默认 `0,3` |
+| `username` | string | 否 | 自定义角色用户名（不含 `@`） |
+| `display_name` | string | 否 | 自定义角色显示名称 |
+| `instruction_set` | string | 否 | 角色指令集（文本） |
+| `safety_instruction_set` | string | 否 | 安全指令集（文本） |
+
 **消息格式:**
 
 ```json
@@ -506,11 +516,11 @@ curl -X POST "http://your-server/v1/images/generations" \
 | `model` | string | 否 | 视频模型，默认 `sora-video-10s` |
 | `video` | file | 是* | 视频文件（multipart/form-data） |
 | `video_base64` | string | 是* | Base64 编码的视频 |
-| `timestamps` | string | 否 | 视频时间戳，如 `0,3` |
-| `username` | string | 否 | 角色用户名 |
-| `display_name` | string | 否 | 角色显示名称 |
-| `instruction_set` | string | 否 | 角色指令集 |
-| `safety_instruction_set` | string | 否 | 安全指令集 |
+| `timestamps` | string | 否 | 视频时间戳，如 `0,3`；留空默认 `0,3` |
+| `username` | string | 否 | 自定义角色用户名（不含 `@`） |
+| `display_name` | string | 否 | 自定义角色显示名称 |
+| `instruction_set` | string | 否 | 角色指令集（文本） |
+| `safety_instruction_set` | string | 否 | 安全指令集（文本） |
 
 *注：`video` 和 `video_base64` 二选一
 
@@ -522,7 +532,9 @@ curl -X POST "http://your-server/v1/characters" \
   -F "video=@character_video.mp4;type=video/mp4" \
   -F "timestamps=0,3" \
   -F "username=my_character" \
-  -F "display_name=My Character"
+  -F "display_name=My Character" \
+  -F "instruction_set=Always speak politely." \
+  -F "safety_instruction_set=Avoid unsafe content."
 ```
 
 **请求示例 (JSON):**
@@ -535,7 +547,9 @@ curl -X POST "http://your-server/v1/characters" \
     "video": "base64_encoded_video_data",
     "timestamps": "0,3",
     "username": "my_character",
-    "display_name": "My Character"
+    "display_name": "My Character",
+    "instruction_set": "Always speak politely.",
+    "safety_instruction_set": "Avoid unsafe content."
   }'
 ```
 
