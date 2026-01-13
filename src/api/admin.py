@@ -215,6 +215,11 @@ class UpdateCloudflareSolverConfigRequest(BaseModel):
     solver_enabled: bool
     solver_api_url: Optional[str] = None
 
+class UpdateLambdaConfigRequest(BaseModel):
+    lambda_enabled: bool
+    lambda_api_url: Optional[str] = None
+    lambda_api_key: Optional[str] = None
+
 # Auth endpoints
 @router.post("/api/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
@@ -1386,6 +1391,47 @@ async def update_generation_timeout(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update generation timeout: {str(e)}")
+
+# Lambda config endpoints
+@router.get("/api/lambda/config")
+async def get_lambda_config(token: str = Depends(verify_admin_token)):
+    """Get Lambda configuration"""
+    try:
+        config_obj = await db.get_lambda_config()
+        return {
+            "success": True,
+            "config": {
+                "lambda_enabled": config_obj.lambda_enabled,
+                "lambda_api_url": config_obj.lambda_api_url,
+                "lambda_api_key": config_obj.lambda_api_key
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get Lambda config: {str(e)}")
+
+@router.post("/api/lambda/config")
+async def update_lambda_config(
+    request: UpdateLambdaConfigRequest,
+    token: str = Depends(verify_admin_token)
+):
+    """Update Lambda configuration"""
+    try:
+        if request.lambda_enabled and not request.lambda_api_url:
+            raise HTTPException(status_code=400, detail="Lambda API URL is required when enabled")
+        if request.lambda_enabled and not request.lambda_api_key:
+            raise HTTPException(status_code=400, detail="Lambda API key is required when enabled")
+
+        await db.update_lambda_config(
+            lambda_enabled=request.lambda_enabled,
+            lambda_api_url=request.lambda_api_url,
+            lambda_api_key=request.lambda_api_key
+        )
+
+        return {"success": True, "message": "Lambda configuration updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update Lambda config: {str(e)}")
 
 # AT auto refresh config endpoints
 @router.get("/api/token-refresh/config")

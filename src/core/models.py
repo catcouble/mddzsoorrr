@@ -156,6 +156,15 @@ class CloudflareSolverConfig(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+class LambdaConfig(BaseModel):
+    """Lambda configuration for video creation"""
+    id: int = 1
+    lambda_enabled: bool = False
+    lambda_api_url: Optional[str] = None
+    lambda_api_key: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
 class WebDAVConfig(BaseModel):
     """WebDAV configuration"""
     id: int = 1

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, List, Dict
 from pathlib import Path
 from contextlib import asynccontextmanager
-from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, WatermarkFreeConfig, CacheConfig, GenerationConfig, TokenRefreshConfig, CloudflareSolverConfig, Character, WebDAVConfig, VideoRecord, UploadLog
+from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, WatermarkFreeConfig, CacheConfig, GenerationConfig, TokenRefreshConfig, CloudflareSolverConfig, LambdaConfig, Character, WebDAVConfig, VideoRecord, UploadLog
 from .db_pool import get_db_connection, get_pool
 from .config import config
 
@@ -415,6 +415,28 @@ class Database:
                 VALUES (1, ?)
             """, (at_auto_refresh_enabled,))
 
+        # Ensure lambda_config has a row
+        if await self._table_exists(db, "lambda_config"):
+            cursor = await db.execute("SELECT COUNT(*) FROM lambda_config")
+            count = await cursor.fetchone()
+            if self._get_count_value(count) == 0:
+                lambda_enabled = False
+                lambda_api_url = None
+                lambda_api_key = None
+
+                if config_dict:
+                    lambda_config = config_dict.get("lambda", {})
+                    lambda_enabled = lambda_config.get("enabled", False)
+                    lambda_api_url = lambda_config.get("api_url", "")
+                    lambda_api_key = lambda_config.get("api_key", "")
+                    lambda_api_url = lambda_api_url if lambda_api_url else None
+                    lambda_api_key = lambda_api_key if lambda_api_key else None
+
+                await db.execute("""
+                    INSERT INTO lambda_config (id, lambda_enabled, lambda_api_url, lambda_api_key)
+                    VALUES (1, ?, ?, ?)
+                """, (lambda_enabled, lambda_api_url, lambda_api_key))
+
         # Ensure cloudflare_solver_config has a row
         if await self._table_exists(db, "cloudflare_solver_config"):
             cursor = await db.execute("SELECT COUNT(*) FROM cloudflare_solver_config")
@@ -450,7 +472,7 @@ class Database:
         
         使用版本号机制，只在版本变化时执行完整迁移检查
         """
-        CURRENT_DB_VERSION = 7  # 增加此版本号以触发迁移
+        CURRENT_DB_VERSION = 8  # 增加此版本号以触发迁移
         
         db = await self._get_connection()
         try:
@@ -529,6 +551,16 @@ class Database:
         
         # 创建新表
         new_tables = [
+            ("lambda_config", """
+                CREATE TABLE IF NOT EXISTS lambda_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    lambda_enabled BOOLEAN DEFAULT 0,
+                    lambda_api_url TEXT,
+                    lambda_api_key TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """),
             ("cloudflare_solver_config", """
                 CREATE TABLE IF NOT EXISTS cloudflare_solver_config (
                     id INTEGER PRIMARY KEY DEFAULT 1,
@@ -778,6 +810,18 @@ class Database:
                 CREATE TABLE IF NOT EXISTS token_refresh_config (
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     at_auto_refresh_enabled BOOLEAN DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Lambda config table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS lambda_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    lambda_enabled BOOLEAN DEFAULT 0,
+                    lambda_api_url TEXT,
+                    lambda_api_key TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -2031,6 +2075,38 @@ class Database:
                     SET at_auto_refresh_enabled = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
                 """, (at_auto_refresh_enabled,))
+            await db.commit()
+
+    # Lambda config operations
+    async def get_lambda_config(self) -> LambdaConfig:
+        """Get Lambda configuration"""
+        async with self._connect(readonly=True) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM lambda_config WHERE id = 1")
+            row = await cursor.fetchone()
+            if row:
+                return LambdaConfig(**dict(row))
+            return LambdaConfig(lambda_enabled=False)
+
+    async def update_lambda_config(self, lambda_enabled: bool, lambda_api_url: Optional[str] = None,
+                                   lambda_api_key: Optional[str] = None):
+        """Update Lambda configuration"""
+        async with self._connect() as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM lambda_config WHERE id = 1")
+            count = await cursor.fetchone()
+            row_exists = self._get_count_value(count) > 0
+
+            if not row_exists:
+                await db.execute("""
+                    INSERT INTO lambda_config (id, lambda_enabled, lambda_api_url, lambda_api_key)
+                    VALUES (1, ?, ?, ?)
+                """, (lambda_enabled, lambda_api_url, lambda_api_key))
+            else:
+                await db.execute("""
+                    UPDATE lambda_config
+                    SET lambda_enabled = ?, lambda_api_url = ?, lambda_api_key = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (lambda_enabled, lambda_api_url, lambda_api_key))
             await db.commit()
 
     # Cloudflare Solver config operations

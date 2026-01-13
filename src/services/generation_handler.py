@@ -790,11 +790,13 @@ class GenerationHandler:
     
     async def _poll_task_result(self, task_id: str, token: str, is_video: bool,
                                 stream: bool, prompt: str, token_id: int = None,
-                                use_pending_v1: bool = False) -> AsyncGenerator[str, None]:
+                                use_pending_v1: bool = False,
+                                release_video_slot: bool = True) -> AsyncGenerator[str, None]:
         """Poll for task result with timeout
         
         Args:
             use_pending_v1: If True, use /nf/pending (v1) for polling instead of /nf/pending/v2
+            release_video_slot: If False, caller manages video concurrency slot release
             
         This method uses adaptive polling intervals based on task progress:
         - 5s when progress < 30%
@@ -847,7 +849,7 @@ class GenerationHandler:
                         debug_logger.log_info(f"Released concurrency slot for token {token_id} due to timeout")
 
                 # Release concurrency slot for video generation
-                if is_video and token_id and self.concurrency_manager:
+                if is_video and token_id and self.concurrency_manager and release_video_slot:
                     await self.concurrency_manager.release_video(token_id)
                     debug_logger.log_info(f"Released concurrency slot for token {token_id} due to timeout")
 
@@ -993,7 +995,7 @@ class GenerationHandler:
                                     )
 
                                     # Release resources
-                                    if token_id and self.concurrency_manager:
+                                    if token_id and self.concurrency_manager and release_video_slot:
                                         await self.concurrency_manager.release_video(token_id)
                                         debug_logger.log_info(f"Released concurrency slot for token {token_id} due to content violation")
 
@@ -1400,7 +1402,7 @@ class GenerationHandler:
                 debug_logger.log_info(f"Released concurrency slot for token {token_id} due to unexpected loop exit")
 
         # Release concurrency slot for video generation
-        if is_video and token_id and self.concurrency_manager:
+        if is_video and token_id and self.concurrency_manager and release_video_slot:
             await self.concurrency_manager.release_video(token_id)
             debug_logger.log_info(f"Released concurrency slot for token {token_id} due to unexpected loop exit")
 

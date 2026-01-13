@@ -17,6 +17,7 @@ import time
 import asyncio
 import uuid
 import re
+import httpx
 from ..core.auth import verify_api_key_header
 from ..services.generation_handler import GenerationHandler, MODEL_CONFIG
 from ..core.models import CharacterOptions, ChatCompletionRequest
@@ -628,6 +629,100 @@ async def _process_video_generation_v2(video_id: str):
         except Exception:
             pass
 
+
+def _build_nf_create_payload(prompt: str, orientation: str, n_frames: int, media_id: Optional[str],
+                             style_id: Optional[str], model: str, size: str) -> dict:
+    payload = {
+        "kind": "video",
+        "prompt": prompt,
+        "title": None,
+        "orientation": orientation,
+        "size": size,
+        "n_frames": n_frames,
+        "inpaint_items": [],
+        "remix_target_id": None,
+        "metadata": None,
+        "cameo_ids": None,
+        "cameo_replacements": None,
+        "model": model,
+        "style_id": None,
+        "audio_caption": None,
+        "audio_transcript": None,
+        "video_caption": None,
+        "storyboard_id": None
+    }
+
+    if media_id:
+        payload["inpaint_items"] = [{"kind": "upload", "upload_id": media_id}]
+    if style_id:
+        payload["style_id"] = style_id.lower()
+    return payload
+
+
+async def _post_lambda_create_task(lambda_url: str, lambda_key: Optional[str],
+                                  token: str, payload: dict) -> str:
+    headers = {"Content-Type": "application/json"}
+    if lambda_key:
+        headers["x-lambda-key"] = lambda_key
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            lambda_url,
+            json={
+                "token": token,
+                "payload": payload
+            },
+            headers=headers
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Lambda create failed: {response.text}")
+
+    try:
+        data = response.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Lambda create returned invalid JSON")
+
+    task_id = data.get("id") or data.get("task_id")
+    if not task_id:
+        raise HTTPException(status_code=502, detail="Lambda create did not return task id")
+    return task_id
+
+
+async def _poll_lambda_task_result(task_id: str, token_obj, prompt: str,
+                                  log_id: Optional[int], start_time: float):
+    try:
+        async for _ in generation_handler._poll_task_result(
+            task_id=task_id,
+            token=token_obj.token,
+            is_video=True,
+            stream=False,
+            prompt=prompt,
+            token_id=token_obj.id,
+            release_video_slot=False
+        ):
+            pass
+
+        duration = time.time() - start_time
+        await generation_handler.token_manager.record_success(token_obj.id, is_video=True)
+        await generation_handler._log_request_complete(
+            log_id,
+            {"task_id": task_id, "status": "success"},
+            200,
+            duration
+        )
+    except Exception as e:
+        duration = time.time() - start_time
+        await generation_handler.db.update_request_log_by_task_id(
+            task_id,
+            response_body=json.dumps({"error": str(e)}),
+            status_code=500,
+            duration=duration
+        )
+    finally:
+        if generation_handler.concurrency_manager:
+            await generation_handler.concurrency_manager.release_video(token_obj.id)
+
 @router.post("/v1/videos", status_code=200)
 async def create_video(
     request: Request,
@@ -752,6 +847,99 @@ async def create_video(
             image_data = input_image
             if "base64," in image_data:
                 image_data = image_data.split("base64,", 1)[1]
+
+        # Lambda create (async only, normal prompt only)
+        if async_mode:
+            from ..core.database import Database
+            from ..core.models import Task
+
+            db = Database()
+            lambda_config = await db.get_lambda_config()
+            can_use_lambda = (
+                lambda_config.lambda_enabled
+                and lambda_config.lambda_api_url
+                and not remix_target_id
+                and not generation_handler.sora_client.is_storyboard_prompt(prompt)
+            )
+
+            if can_use_lambda:
+                token_obj = await generation_handler.load_balancer.select_token(for_video_generation=True)
+                if not token_obj:
+                    raise HTTPException(status_code=400, detail="No available tokens for video generation")
+
+                concurrency_acquired = True
+                if generation_handler.concurrency_manager:
+                    concurrency_acquired = await generation_handler.concurrency_manager.acquire_video(token_obj.id)
+                    if not concurrency_acquired:
+                        raise HTTPException(status_code=400, detail="Token concurrency limit reached for video generation")
+
+                start_time = time.time()
+                try:
+                    media_id = None
+                    if image_data:
+                        image_bytes = generation_handler._decode_base64_image(image_data)
+                        media_id = await generation_handler.sora_client.upload_image(image_bytes, token_obj.token)
+
+                    model_config = MODEL_CONFIG[final_model]
+                    n_frames = model_config.get("n_frames", duration * 30)
+                    payload = _build_nf_create_payload(
+                        prompt=prompt,
+                        orientation=model_config.get("orientation", orient),
+                        n_frames=n_frames,
+                        media_id=media_id,
+                        style_id=style_id,
+                        model=model_config.get("model", "sy_8"),
+                        size=model_config.get("size", "small")
+                    )
+
+                    task_id = await _post_lambda_create_task(
+                        lambda_url=lambda_config.lambda_api_url,
+                        lambda_key=lambda_config.lambda_api_key,
+                        token=token_obj.token,
+                        payload=payload
+                    )
+
+                    task = Task(
+                        task_id=task_id,
+                        token_id=token_obj.id,
+                        model=final_model,
+                        prompt=prompt,
+                        status="processing",
+                        progress=0.0
+                    )
+                    await db.create_task(task)
+
+                    log_id = await generation_handler._log_request_start(
+                        token_obj.id,
+                        task_id,
+                        "generate_video",
+                        {"model": model, "prompt": prompt, "has_image": image_data is not None, "via_lambda": True}
+                    )
+
+                    await generation_handler.token_manager.record_usage(token_obj.id, is_video=True)
+                    asyncio.create_task(_poll_lambda_task_result(task_id, token_obj, prompt, log_id, start_time))
+
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "id": task_id,
+                            "object": "video",
+                            "model": model,
+                            "status": "in_progress",
+                            "progress": 0,
+                            "created_at": int(start_time),
+                            "seconds": str(duration),
+                            "size": size,
+                        }
+                    )
+                except HTTPException:
+                    if concurrency_acquired and generation_handler.concurrency_manager:
+                        await generation_handler.concurrency_manager.release_video(token_obj.id)
+                    raise
+                except Exception as e:
+                    if concurrency_acquired and generation_handler.concurrency_manager:
+                        await generation_handler.concurrency_manager.release_video(token_obj.id)
+                    raise HTTPException(status_code=500, detail=f"Lambda create failed: {str(e)}")
         
         # Generate task ID (new-api-main compatible format)
         video_id = f"{model}-{uuid.uuid4().hex[:12]}"
