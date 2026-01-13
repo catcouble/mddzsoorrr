@@ -440,17 +440,25 @@ def _extract_character_info(chunks_data: list) -> dict:
                     delta = choices[0].get("delta", {})
                     # Check metadata for character info
                     metadata = delta.get("metadata", {})
-                    if metadata.get("character"):
-                        result.update(metadata)
+                    if metadata:
+                        # Extract character-related fields from metadata
+                        if metadata.get("cameo_id"):
+                            result["cameo_id"] = metadata["cameo_id"]
+                        if metadata.get("character_id"):
+                            result["character_id"] = metadata["character_id"]
+                        if metadata.get("username"):
+                            result["username"] = metadata["username"]
+                        if metadata.get("display_name"):
+                            result["display_name"] = metadata["display_name"]
                     # Check content for character info
                     content = delta.get("content", "")
                     if content:
-                        # Extract cameo_id pattern
+                        # Extract cameo_id pattern (ch_ followed by 32 hex chars)
                         cameo_match = re.search(r'ch_[a-f0-9]{32}', content)
                         if cameo_match:
                             result["cameo_id"] = cameo_match.group(0)
                         # Store message
-                        if "character" in content.lower() or "cameo" in content.lower():
+                        if "character" in content.lower() or "cameo" in content.lower() or "角色" in content:
                             result["message"] = content
             except Exception:
                 pass

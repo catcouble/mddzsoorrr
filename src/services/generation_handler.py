@@ -1418,7 +1418,7 @@ class GenerationHandler:
     def _format_stream_chunk(self, content: str = None, reasoning_content: str = None,
                             finish_reason: str = None, is_first: bool = False,
                             stage: str = None, status: str = None, progress: float = None,
-                            details: Dict[str, Any] = None) -> str:
+                            details: Dict[str, Any] = None, metadata: Dict[str, Any] = None) -> str:
         """Format streaming response chunk with structured reasoning_content
 
         Args:
@@ -1430,6 +1430,7 @@ class GenerationHandler:
             status: Current status (e.g., "started", "processing", "completed", "error")
             progress: Progress percentage (0-100)
             details: Additional details as a dictionary
+            metadata: Additional metadata to include in delta (e.g., character info)
 
         Returns:
             Formatted SSE data string
@@ -1461,6 +1462,10 @@ class GenerationHandler:
             
             if message_parts:
                 delta["reasoning_content"] = " ".join(message_parts)
+
+        # Add metadata if provided
+        if metadata:
+            delta["metadata"] = metadata
 
         response = {
             "id": chunk_id,
@@ -1811,7 +1816,7 @@ class GenerationHandler:
             await self.db.create_character(character_record)
             debug_logger.log_info(f"Character saved to database: cameo_id={cameo_id}")
 
-            # Step 9: Return success message - structured format
+            # Step 9: Return success message - structured format with metadata
             yield self._format_stream_chunk(
                 content=self._format_result_content(
                     result_type="character",
@@ -1820,6 +1825,12 @@ class GenerationHandler:
                     cameo_id=cameo_id,
                     character_id=character_id
                 ),
+                metadata={
+                    "cameo_id": cameo_id,
+                    "character_id": character_id,
+                    "username": username,
+                    "display_name": display_name
+                },
                 finish_reason="STOP"
             )
             yield "data: [DONE]\n\n"
