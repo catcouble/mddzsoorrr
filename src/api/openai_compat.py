@@ -503,6 +503,17 @@ import asyncio
 _video_tasks: dict = {}  # video_id -> task_info dict
 
 
+def _openai_error(message: str, code: str, error_type: str = "invalid_request_error", param: Optional[str] = None) -> dict:
+    return {
+        "error": {
+            "message": message,
+            "type": error_type,
+            "code": code,
+            "param": param,
+        }
+    }
+
+
 async def _process_video_generation_v2(video_id: str):
     """Background task to process video generation (updates in-memory task)
     
@@ -1302,7 +1313,13 @@ async def get_video(
             response["remixed_from_video_id"] = task_info["remix_target_id"]
         
         if task_info.get("error"):
-            response["error"] = task_info["error"]
+            err = task_info["error"]
+            response["error"] = {
+                "message": (err or {}).get("message") or "Video generation failed",
+                "type": "invalid_request_error",
+                "code": (err or {}).get("code") or "generation_failed",
+                "param": None,
+            }
         
         return JSONResponse(content=response)
     
@@ -1312,7 +1329,7 @@ async def get_video(
     
     task = await db.get_task(video_id)
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        return JSONResponse(status_code=404, content=_openai_error("Task not found", "task_not_found"))
     
     created_at = int(task.created_at.timestamp()) if task.created_at else int(time.time())
     
@@ -1362,7 +1379,9 @@ async def get_video(
     if task.error_message:
         response["error"] = {
             "message": task.error_message,
-            "code": "generation_failed"
+            "type": "invalid_request_error",
+            "code": "generation_failed",
+            "param": None,
         }
     
     return JSONResponse(content=response)
@@ -1385,37 +1404,25 @@ async def get_video_content(
     if task_info and isinstance(task_info, dict):
         if task_info.get("status") == "failed":
             err = task_info.get("error")
-            raise HTTPException(
+            return JSONResponse(
                 status_code=400,
-                detail={
-                    "error": {
-                        "message": (err or {}).get("message") or "Video generation failed",
-                        "code": (err or {}).get("code") or "generation_failed",
-                    }
-                },
+                content=_openai_error(
+                    (err or {}).get("message") or "Video generation failed",
+                    (err or {}).get("code") or "generation_failed",
+                ),
             )
         if task_info["status"] != "completed":
-            raise HTTPException(
-                status_code=400, 
-                detail={
-                    "error": {
-                        "message": f"Task not completed. Current status: {task_info['status']}",
-                        "code": "task_not_completed"
-                    }
-                }
+            return JSONResponse(
+                status_code=400,
+                content=_openai_error(
+                    f"Task not completed. Current status: {task_info['status']}",
+                    "task_not_completed",
+                ),
             )
         
         result_url = task_info.get("result_url")
         if not result_url:
-            raise HTTPException(
-                status_code=404, 
-                detail={
-                    "error": {
-                        "message": "Video content not available",
-                        "code": "content_not_found"
-                    }
-                }
-            )
+            return JSONResponse(status_code=404, content=_openai_error("Video content not available", "content_not_found"))
         
         return RedirectResponse(url=result_url)
     
@@ -1425,36 +1432,21 @@ async def get_video_content(
     
     task = await db.get_task(video_id)
     if not task:
-        raise HTTPException(
-            status_code=404, 
-            detail={
-                "error": {
-                    "message": "Task not found",
-                    "code": "task_not_found"
-                }
-            }
-        )
+        return JSONResponse(status_code=404, content=_openai_error("Task not found", "task_not_found"))
     
     if task.status == "failed":
-        raise HTTPException(
-            status_code=400, 
-            detail={
-                "error": {
-                    "message": f"Video generation failed: {task.error_message or 'Unknown error'}",
-                    "code": "generation_failed"
-                }
-            }
+        return JSONResponse(
+            status_code=400,
+            content=_openai_error(
+                f"Video generation failed: {task.error_message or 'Unknown error'}",
+                "generation_failed",
+            ),
         )
     
     if task.status != "completed" or not task.result_urls:
-        raise HTTPException(
-            status_code=400, 
-            detail={
-                "error": {
-                    "message": f"Task not completed. Current status: {task.status}",
-                    "code": "task_not_completed"
-                }
-            }
+        return JSONResponse(
+            status_code=400,
+            content=_openai_error(f"Task not completed. Current status: {task.status}", "task_not_completed"),
         )
     
     return RedirectResponse(url=task.result_urls)
