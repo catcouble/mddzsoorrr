@@ -1062,6 +1062,24 @@ async def create_video(
             if "base64," in image_data:
                 image_data = image_data.split("base64,", 1)[1]
 
+        # Extract business user identifier from metadata.extra_s_custom_meta.user_id
+        user_id_str = None
+        if metadata:
+            try:
+                if isinstance(metadata, str):
+                    metadata_obj = json.loads(metadata)
+                elif isinstance(metadata, dict):
+                    metadata_obj = metadata
+                else:
+                    metadata_obj = {}
+            except Exception:
+                metadata_obj = {}
+
+            if isinstance(metadata_obj, dict):
+                extra = metadata_obj.get("extra_s_custom_meta") or {}
+                if isinstance(extra, dict):
+                    user_id_str = extra.get("user_id")
+
         # Lambda create (async only, normal prompt only)
         if async_mode:
             from ..core.database import Database
@@ -1113,7 +1131,8 @@ async def create_video(
                         model=final_model,
                         prompt=prompt,
                         status="processing",
-                        progress=0.0
+                        progress=0.0,
+                        user_id=user_id_str,
                     )
                     await db.create_task(task)
 
@@ -1167,7 +1186,8 @@ async def create_video(
                 model=final_model,
                 prompt=prompt,
                 status="in_progress",  # new-api-main uses in_progress
-                progress=0.0
+                progress=0.0,
+                user_id=user_id_str,
             )
             await db.create_task(task)
             
@@ -1378,14 +1398,82 @@ async def get_video(
     
     if task.error_message:
         response["error"] = {
-            "message": task.error_message,
-            "type": "invalid_request_error",
-            "code": "generation_failed",
-            "param": None,
         }
-    
     return JSONResponse(content=response)
 
+@router.post("/v1/videos/history")
+async def get_video_history(
+    body: dict,
+    api_key: str = Depends(verify_api_key_header),
+):
+    """List video generation history for a specific business user (new-api-main compatible).
+
+    Request body:
+    - user_id: business user identifier (e.g. "1234_alice")
+    - limit: max items to return (default 50)
+    - offset: offset for pagination (default 0)
+
+    Response:
+    { "items": [
+        {
+          "client_request_id": task_id,
+          "prompt": prompt,
+          "model": model,
+          "status": status,
+          "progress": progress,
+          "generation_id": null,
+          "result_urls": [url],
+          "error_message": error,
+          "created_at": created_at,
+          "completed_at": completed_at,
+          "post_id": null
+        },
+        ...
+    ]}
+    """
+    from ..core.database import Database
+    import json
+
+    user_id = body.get("user_id")
+    limit = int(body.get("limit") or 50)
+    offset = int(body.get("offset") or 0)
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    db = Database()
+    tasks = await db.list_tasks_by_user_id(user_id=user_id, limit=limit, offset=offset)
+
+    items = []
+    for t in tasks:
+        # result_urls stored as JSON string in DB; normalize to list
+        urls: list = []
+        if t.result_urls:
+            try:
+                parsed = json.loads(t.result_urls)
+                if isinstance(parsed, list):
+                    urls = parsed
+                elif isinstance(parsed, str):
+                    urls = [parsed]
+            except Exception:
+                urls = [t.result_urls]
+
+        item = {
+            "client_request_id": t.task_id,
+            "prompt": t.prompt,
+            "model": t.model,
+            "status": t.status,
+            "progress": float(t.progress or 0),
+            "generation_id": None,
+            "result_urls": urls,
+            "error_message": t.error_message,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+            "post_id": None,
+        }
+        items.append(item)
+
+    return {"items": items}
 
 @router.get("/v1/videos/{video_id}/content")
 async def get_video_content(

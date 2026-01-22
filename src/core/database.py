@@ -873,7 +873,8 @@ class Database:
                     result_urls TEXT,
                     error_message TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    completed_at TIMESTAMP
+                    completed_at TIMESTAMP,
+                    user_id TEXT
                 )
             """)
 
@@ -1077,6 +1078,14 @@ class Database:
                 await db.execute("ALTER TABLE token_stats ADD COLUMN today_error_count INTEGER DEFAULT 0")
             if not await self._column_exists(db, "token_stats", "today_date"):
                 await db.execute("ALTER TABLE token_stats ADD COLUMN today_date DATE")
+
+            # Migration: Add user_id column to tasks table if missing
+            if not await self._column_exists(db, "tasks", "user_id"):
+                await db.execute("ALTER TABLE tasks ADD COLUMN user_id TEXT")
+
+            # Now that user_id column is guaranteed to exist, create index on it
+            if await self._column_exists(db, "tasks", "user_id"):
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_task_user_id ON tasks(user_id)")
 
             await self._ensure_token_stats_unique_index(db)
 
@@ -1717,9 +1726,9 @@ class Database:
             try:
                 async with self._connect() as db:
                     cursor = await db.execute("""
-                        INSERT INTO tasks (task_id, token_id, model, prompt, status, progress)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (task.task_id, task.token_id, task.model, task.prompt, task.status, task.progress))
+                        INSERT INTO tasks (task_id, token_id, model, prompt, status, progress, user_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (task.task_id, task.token_id, task.model, task.prompt, task.status, task.progress, task.user_id))
                     await db.commit()
                     return cursor.lastrowid
             except Exception as e:
@@ -1767,6 +1776,22 @@ class Database:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
+            )
+            rows = await cursor.fetchall()
+            return [Task(**dict(row)) for row in rows]
+
+    async def list_tasks_by_user_id(self, user_id: str, limit: int = 50, offset: int = 0) -> List[Task]:
+        """List tasks for a specific business user ordered by creation time (most recent first)."""
+        async with self._connect(readonly=True) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT * FROM tasks
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (user_id, limit, offset),
             )
             rows = await cursor.fetchall()
             return [Task(**dict(row)) for row in rows]

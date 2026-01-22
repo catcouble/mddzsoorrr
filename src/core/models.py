@@ -67,6 +67,8 @@ class Task(BaseModel):
     error_message: Optional[str] = None
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    # Business user identifier (e.g. "1234_alice" from newapi getCurrentUserId())
+    user_id: Optional[str] = None
 
 class Character(BaseModel):
     """Character (角色卡) model"""
